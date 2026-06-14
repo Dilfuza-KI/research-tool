@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState } from 'react';
+﻿import { useEffect, useRef, useState, useMemo } from 'react';
 import { Document, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/TextLayer.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
@@ -7,17 +7,358 @@ import './index.css';
 pdfjs.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
 const samplePapers = [
-  {
-    id: 1,
-    title: 'Deep Learning for Communication',
-    file: '/sample.pdf'
-  },
-  {
-    id: 2,
-    title: 'Cognitive Agents in Research',
-    file: '/sample.pdf'
-  }
+  { id: 1, title: 'Deep Learning for Communication', file: '/sample.pdf', fileType: 'pdf', sourceType: 'journal', authors: '', organization: '', journal: '', year: '', volume: '', issue: '', pages: '', doi: '', url: '', city: '', publisher: '', edition: '', accessDate: '', newspaper: '', newsDate: '', thesisType: 'master', university: '', reportSeries: '' },
+  { id: 2, title: 'Cognitive Agents in Research', file: '/sample.pdf', fileType: 'pdf', sourceType: 'journal', authors: '', organization: '', journal: '', year: '', volume: '', issue: '', pages: '', doi: '', url: '', city: '', publisher: '', edition: '', accessDate: '', newspaper: '', newsDate: '', thesisType: 'master', university: '', reportSeries: '' }
 ];
+
+const emptyMeta = { sourceType: 'journal', authors: '', organization: '', journal: '', year: '', volume: '', issue: '', pages: '', doi: '', url: '', city: '', publisher: '', edition: '', accessDate: '', newspaper: '', newsDate: '', thesisType: 'master', university: '', reportSeries: '' };
+
+// Known global health & academic organizations by domain
+const KNOWN_ORGS = {
+  // UN System
+  'who.int': 'World Health Organization',
+  'unicef.org': 'UNICEF',
+  'unfpa.org': 'United Nations Population Fund',
+  'undp.org': 'United Nations Development Programme',
+  'unaids.org': 'UNAIDS',
+  'unhcr.org': 'United Nations High Commissioner for Refugees',
+  'wfp.org': 'World Food Programme',
+  'un.org': 'United Nations',
+  'ilo.org': 'International Labour Organization',
+  'iom.int': 'International Organization for Migration',
+  'unep.org': 'United Nations Environment Programme',
+  'unesco.org': 'UNESCO',
+  'fao.org': 'Food and Agriculture Organization',
+  'paho.org': 'Pan American Health Organization',
+  'afro.who.int': 'WHO Regional Office for Africa',
+  'euro.who.int': 'WHO Regional Office for Europe',
+  'data.unicef.org': 'UNICEF',
+  'unicef.org': 'UNICEF',
+  // Humanitarian
+  'msf.org': 'Médecins Sans Frontières',
+  'msf.se': 'Läkare Utan Gränser',
+  'doctorswithoutborders.org': 'Doctors Without Borders',
+  'icrc.org': 'International Committee of the Red Cross',
+  'ifrc.org': 'International Federation of Red Cross and Red Crescent Societies',
+  'oxfam.org': 'Oxfam International',
+  'savethechildren.org': 'Save the Children',
+  'savethechildren.net': 'Save the Children',
+  'savethechildren.se': 'Rädda Barnen',
+  'care.org': 'CARE International',
+  'concern.net': 'Concern Worldwide',
+  'rescue.org': 'International Rescue Committee',
+  'mercycorps.org': 'Mercy Corps',
+  'actionaid.org': 'ActionAid',
+  'plan-international.org': 'Plan International',
+  'worldvision.org': 'World Vision',
+  // Finance & Development
+  'worldbank.org': 'World Bank',
+  'imf.org': 'International Monetary Fund',
+  'oecd.org': 'Organisation for Economic Co-operation and Development',
+  'gavi.org': 'Gavi the Vaccine Alliance',
+  'theglobalfund.org': 'The Global Fund',
+  'pepfar.gov': 'PEPFAR',
+  'usaid.gov': 'United States Agency for International Development',
+  // US Health
+  'cdc.gov': 'Centers for Disease Control and Prevention',
+  'nih.gov': 'National Institutes of Health',
+  'ncbi.nlm.nih.gov': 'National Center for Biotechnology Information',
+  'pubmed.ncbi.nlm.nih.gov': 'PubMed',
+  'fda.gov': 'US Food and Drug Administration',
+  'hhs.gov': 'US Department of Health and Human Services',
+  'cms.gov': 'Centers for Medicare and Medicaid Services',
+  'healthdata.org': 'Institute for Health Metrics and Evaluation',
+  // European Health
+  'ecdc.europa.eu': 'European Centre for Disease Prevention and Control',
+  'ema.europa.eu': 'European Medicines Agency',
+  'eurostat.ec.europa.eu': 'Eurostat',
+  'europa.eu': 'European Union',
+  // Swedish
+  'ki.se': 'Karolinska Institutet',
+  'kib.ki.se': 'Karolinska Institutet University Library',
+  'socialstyrelsen.se': 'Socialstyrelsen',
+  'folkhalsomyndigheten.se': 'Folkhälsomyndigheten',
+  'lakemedelsverket.se': 'Läkemedelsverket',
+  'sbu.se': 'Statens beredning för medicinsk och social utvärdering',
+  'riksdagen.se': 'Riksdagen',
+  'government.se': 'Government of Sweden',
+  'vardgivarguiden.se': 'Vårdgivarguiden',
+  'janusinfo.se': 'Janusinfo',
+  '1177.se': '1177 Vårdguiden',
+  'regionstockholm.se': 'Region Stockholm',
+  'vgregion.se': 'Västra Götalandsregionen',
+  // Academic publishers
+  'nejm.org': 'New England Journal of Medicine',
+  'lancet.com': 'The Lancet',
+  'bmj.com': 'The BMJ',
+  'nature.com': 'Nature Publishing Group',
+  'springer.com': 'Springer',
+  'elsevier.com': 'Elsevier',
+  'wiley.com': 'Wiley',
+  'taylorandfrancis.com': 'Taylor and Francis',
+  'jamanetwork.com': 'JAMA Network',
+  'academic.oup.com': 'Oxford University Press',
+};
+
+function getOrgFromDomain(url) {
+  try {
+    const hostname = new URL(url).hostname.replace('www.', '');
+    // Check exact match first
+    if (KNOWN_ORGS[hostname]) return KNOWN_ORGS[hostname];
+    // Check subdomains — e.g. data.unicef.org should match unicef.org
+    for (const [domain, org] of Object.entries(KNOWN_ORGS)) {
+      if (hostname === domain || hostname.endsWith('.' + domain)) return org;
+    }
+    // Check if any known domain is contained in hostname
+    for (const [domain, org] of Object.entries(KNOWN_ORGS)) {
+      if (hostname.includes(domain.split('.')[0])) return org;
+    }
+    return '';
+  } catch { return ''; }
+}
+function extractDOI(text) {
+  const patterns = [/https?:\/\/doi\.org\/(10\.\d{4,}[^\s"<>\]]*)/i, /doi\.org\/(10\.\d{4,}[^\s"<>\]]*)/i, /DOI[:\s]+(10\.\d{4,}[^\s"<>\]]*)/i, /\b(10\.\d{4,}\/[^\s"<>\]]*)/i];
+  for (const p of patterns) { const m = text.match(p); if (m) return m[1].replace(/[.,;)\]]+$/, '').trim(); }
+  return null;
+}
+
+async function fetchFromCrossRef(doi) {
+  try {
+    const r = await fetch(`https://api.crossref.org/works/${encodeURIComponent(doi)}`);
+    if (!r.ok) return null;
+    const d = await r.json(); const w = d.message;
+    const authors = (w.author || []).map(a => `${a.family || ''} ${(a.given || '').split(' ').map(n => n[0]).join('')}`.trim()).join(', ');
+    return { title: (w.title || [])[0] || '', authors, journal: (w['container-title'] || [])[0] || '', year: w.published?.['date-parts']?.[0]?.[0]?.toString() || '', volume: w.volume || '', issue: w.issue || '', pages: w.page || '', doi };
+  } catch { return null; }
+}
+async function fetchFromPubMed(doi) {
+  try {
+    const s = await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi?db=pubmed&term=${encodeURIComponent(doi)}&retmode=json`);
+    if (!s.ok) return null;
+    const sd = await s.json(); const ids = sd.esearchresult?.idlist;
+    if (!ids?.length) return null;
+    const dr = await fetch(`https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=pubmed&id=${ids[0]}&retmode=json`);
+    if (!dr.ok) return null;
+    const dd = await dr.json(); const a = dd.result?.[ids[0]];
+    if (!a) return null;
+    return { title: a.title || '', authors: (a.authors || []).map(x => x.name).join(', '), journal: a.source || '', year: a.pubdate?.split(' ')[0] || '', volume: a.volume || '', issue: a.issue || '', pages: a.pages || '', doi };
+  } catch { return null; }
+}
+async function fetchFromOpenAlex(doi) {
+  try {
+    const r = await fetch(`https://api.openalex.org/works/https://doi.org/${encodeURIComponent(doi)}`);
+    if (!r.ok) return null;
+    const w = await r.json();
+    const authors = (w.authorships || []).map(a => a.author?.display_name || '').filter(Boolean).join(', ');
+    const b = w.biblio || {};
+    return { title: w.title || '', authors, journal: w.primary_location?.source?.display_name || '', year: w.publication_year?.toString() || '', volume: b.volume || '', issue: b.issue || '', pages: b.first_page && b.last_page ? `${b.first_page}-${b.last_page}` : b.first_page || '', doi };
+  } catch { return null; }
+}
+async function fetchFromSciELO(doi) {
+  try {
+    const r = await fetch(`https://api.scielo.org/v1/article/?doi=${encodeURIComponent(doi)}&format=json`);
+    if (!r.ok) return null;
+    const d = await r.json(); const a = d.objects?.[0];
+    if (!a) return null;
+    const authors = (a.authors || []).map(x => `${x.surname || ''} ${(x.given_names || '').split(' ').map(n => n[0]).join('')}`.trim()).join(', ');
+    return { title: a.title || '', authors, journal: a.journal_title || '', year: a.publication_year?.toString() || '', volume: a.volume || '', issue: a.issue || '', pages: a.start_page && a.end_page ? `${a.start_page}-${a.end_page}` : '', doi };
+  } catch { return null; }
+}
+// Auto-detect metadata from any webpage URL using microlink.io (free)
+async function fetchWebpageMeta(url) {
+  try {
+    const r = await fetch(`https://api.microlink.io?url=${encodeURIComponent(url)}`);
+    if (!r.ok) return null;
+    const d = await r.json();
+    if (d.status !== 'success') return null;
+    const data = d.data;
+    // Extract year from date if available — but don't use current year as it likely means no real date found
+    let year = '';
+    if (data.date) {
+      const match = data.date.match(/(\d{4})/);
+      if (match) {
+        const detectedYear = match[1];
+        const currentYear = new Date().getFullYear().toString();
+        // Only use year if it is not the current year — current year likely means no real pub date found
+        if (detectedYear !== currentYear) year = detectedYear;
+      }
+    }
+    // Format access date as today
+    const today = new Date();
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const accessDate = `${today.getFullYear()} ${months[today.getMonth()]} ${today.getDate()}`;
+    // Clean up publisher — try known orgs first, then microlink publisher
+    let organization = getOrgFromDomain(url);
+    if (!organization) {
+      const raw = data.publisher || '';
+      // Ignore domain-only names like "who.int"
+      if (raw && raw.includes(' ')) organization = raw;
+    }
+    return {
+      title: data.title || '',
+      organization,
+      authors: data.author || '',
+      year,
+      url,
+      accessDate,
+    };
+  } catch { return null; }
+}
+
+async function fetchMetadata(doi, onStatus) {
+  onStatus('🔍 Trying CrossRef...'); const cr = await fetchFromCrossRef(doi); if (cr?.title) return { meta: cr, source: 'CrossRef' };
+  onStatus('🔍 Trying PubMed...'); const pm = await fetchFromPubMed(doi); if (pm?.title) return { meta: pm, source: 'PubMed' };
+  onStatus('🔍 Trying OpenAlex...'); const oa = await fetchFromOpenAlex(doi); if (oa?.title) return { meta: oa, source: 'OpenAlex' };
+  onStatus('🔍 Trying SciELO...'); const sc = await fetchFromSciELO(doi); if (sc?.title) return { meta: sc, source: 'SciELO' };
+  return null;
+}
+async function extractTextFromPDF(fileUrl) {
+  try {
+    const pdf = await pdfjs.getDocument(fileUrl).promise;
+    let text = '';
+    for (let i = 1; i <= Math.min(3, pdf.numPages); i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      text += content.items.map(x => x.str).join(' ');
+    }
+    return text;
+  } catch { return ''; }
+}
+
+function limitAuthorsVancouver(authorsStr) {
+  if (!authorsStr) return '';
+  const list = authorsStr.split(',').map(a => a.trim()).filter(Boolean);
+  if (list.length <= 6) return list.join(', ');
+  return list.slice(0, 6).join(', ') + ', et al';
+}
+function formatAuthorsAPA(authorsStr, orgFallback) {
+  if (!authorsStr) return orgFallback || 'Author, A.';
+  const list = authorsStr.split(',').map(a => a.trim()).filter(Boolean);
+  if (list.length === 1) return list[0];
+  if (list.length === 2) return `${list[0]}, & ${list[1]}`;
+  if (list.length <= 20) return `${list.slice(0, -1).join(', ')}, & ${list[list.length - 1]}`;
+  return `${list.slice(0, 19).join(', ')}, ... ${list[list.length - 1]}`;
+}
+
+function generateCitations(paper) {
+  const t = paper.title || 'Title';
+  const y = paper.year || 'n.d.';
+  const auth = paper.authors || '';
+  const org = paper.organization || '';
+  const doiLink = paper.doi ? ` https://doi.org/${paper.doi}` : '';
+  const url = paper.url || '';
+  const city = paper.city || '';
+  const pub = paper.publisher || '';
+  const acc = paper.accessDate || '';
+  const ed = paper.edition ? ` ${paper.edition} ed.` : '';
+
+  switch (paper.sourceType) {
+    case 'journal': {
+      const j = paper.journal || 'Journal'; const v = paper.volume || ''; const iss = paper.issue || ''; const pg = paper.pages || '';
+      const vanA = limitAuthorsVancouver(auth) || org || 'Author A';
+      const volVan = v ? `${v}${iss ? `(${iss})` : ''}:${pg}` : pg;
+      const vancouver = `${vanA}. ${t}. ${j}. ${y}${volVan ? `;${volVan}` : ''}.${doiLink}`;
+      const apaA = formatAuthorsAPA(auth, org);
+      const volAPA = v ? `${v}${iss ? `(${iss})` : ''}` : '';
+      const apa = `${apaA} (${y}). ${t}. ${j}${volAPA ? `, ${volAPA}` : ''}${pg ? `, ${pg}` : ''}.${doiLink}`;
+      const mla = `${auth || org || 'Author'}. "${t}." ${j}${v ? `, vol. ${v}` : ''}${iss ? `, no. ${iss}` : ''}, ${y}${pg ? `, pp. ${pg}` : ''}.`;
+      return { apa, mla, vancouver };
+    }
+    case 'book': {
+      const vanA = limitAuthorsVancouver(auth) || org || 'Author A';
+      const apaA = formatAuthorsAPA(auth, org);
+      const cityPub = [city, pub].filter(Boolean).join(': ');
+      const vancouver = `${vanA}. ${t}.${ed ? ` ${ed}.` : ''} ${cityPub ? `${cityPub};` : ''} ${y}.${doiLink}`;
+      const apa = `${apaA} (${y}). ${t}${paper.edition ? ` (${paper.edition} ed.)` : ''}. ${pub || city || 'Publisher'}.${doiLink}`;
+      const mla = `${auth || org || 'Author'}. ${t}. ${pub || 'Publisher'}, ${y}.`;
+      return { apa, mla, vancouver };
+    }
+    case 'webpage': {
+      const nameV = org || limitAuthorsVancouver(auth) || 'Author';
+      const nameA = org || formatAuthorsAPA(auth, org);
+      const displayYear = y && y !== 'n.d.' ? y : '[date unknown]';
+      const displayYearAPA = y && y !== 'n.d.' ? y : 'n.d.';
+      const citedP = acc ? ` [cited ${acc}]` : '';
+      const availP = url ? ` Available from: ${url}` : '';
+      const cityPubP = [city, org || pub].filter(Boolean).join(': ');
+      const vancouver = `${nameV}. ${t} [Internet]. ${cityPubP ? `${cityPubP};` : ''} ${displayYear}${citedP}.${availP}`;
+      const apa = `${nameA}. (${displayYearAPA}). ${t}. ${url}`;
+      const mla = `${nameA}. "${t}." ${org || pub || 'Website'}, ${displayYearAPA}, ${url}`;
+      return { apa, mla, vancouver };
+    }
+    case 'report': {
+      const nameV = limitAuthorsVancouver(auth) || org || 'Author';
+      const nameA = formatAuthorsAPA(auth, org);
+      const citedP = acc ? ` [cited ${acc}]` : '';
+      const availP = url ? ` Available from: ${url}` : '';
+      const series = paper.reportSeries ? ` ${paper.reportSeries}.` : '';
+      const cityPubP = [city, pub || org].filter(Boolean).join(': ');
+      const vancouver = `${nameV}. ${t}${url ? ' [Internet]' : ''}.${series} ${cityPubP ? `${cityPubP};` : ''} ${y}${citedP}.${availP}`;
+      const apa = `${nameA}. (${y}). ${t}${paper.reportSeries ? ` (${paper.reportSeries})` : ''}. ${pub || org || 'Publisher'}.${url ? ` ${url}` : ''}`;
+      const mla = `${nameA}. "${t}." ${pub || org || 'Publisher'}, ${y}.${url ? ` ${url}` : ''}`;
+      return { apa, mla, vancouver };
+    }
+    case 'thesis': {
+      const tLabel = paper.thesisType === 'doctoral' ? 'dissertation' : "master's thesis";
+      const tLabelA = paper.thesisType === 'doctoral' ? 'Doctoral dissertation' : "Master's thesis";
+      const uni = paper.university || 'University';
+      const vanA = limitAuthorsVancouver(auth) || 'Author';
+      const apaA = formatAuthorsAPA(auth, '');
+      const vancouver = `${vanA}. ${t} [${tLabel}]. ${city ? `${city}: ` : ''}${uni}; ${y}.${url ? ` Available from: ${url}` : ''}`;
+      const apa = `${apaA} (${y}). ${t} [${tLabelA}, ${uni}].${url ? ` ${url}` : ''}`;
+      const mla = `${auth || 'Author'}. "${t}." ${tLabelA}, ${uni}, ${y}.`;
+      return { apa, mla, vancouver };
+    }
+    case 'newspaper': {
+      const vanA = limitAuthorsVancouver(auth) || org || 'Author';
+      const apaA = formatAuthorsAPA(auth, org);
+      const np = paper.newspaper || 'Newspaper'; const nd = paper.newsDate || y;
+      const citedP = acc ? ` [cited ${acc}]` : '';
+      const availP = url ? ` Available from: ${url}` : '';
+      const vancouver = `${vanA}. ${t}. ${np}${url ? ' [Internet]' : ''}. ${nd}${citedP}.${availP}`;
+      const apa = `${apaA} (${nd}). ${t}. ${np}.${url ? ` ${url}` : ''}`;
+      const mla = `${auth || org || 'Author'}. "${t}." ${np}, ${nd}.${url ? ` ${url}` : ''}`;
+      return { apa, mla, vancouver };
+    }
+    default: return { apa: t, mla: t, vancouver: t };
+  }
+}
+
+const SOURCE_TYPES = [
+  { value: 'journal', label: '📄 Journal article' },
+  { value: 'book', label: '📚 Book' },
+  { value: 'webpage', label: '🌐 Web page' },
+  { value: 'report', label: '📊 Report' },
+  { value: 'thesis', label: '🎓 Thesis' },
+  { value: 'newspaper', label: '📰 Newspaper' },
+];
+const FIELDS = {
+  journal: ['authors', 'journal', 'year', 'volume', 'issue', 'pages', 'doi'],
+  book: ['authors', 'organization', 'year', 'edition', 'city', 'publisher', 'doi', 'url'],
+  webpage: ['organization', 'authors', 'year', 'city', 'url', 'accessDate'],
+  report: ['organization', 'authors', 'year', 'city', 'publisher', 'reportSeries', 'url', 'accessDate'],
+  thesis: ['authors', 'thesisType', 'university', 'year', 'city', 'url'],
+  newspaper: ['authors', 'organization', 'newspaper', 'newsDate', 'year', 'url', 'accessDate'],
+};
+const FIELD_CONFIG = {
+  authors: { label: 'Authors (Surname AB, Surname CD)', placeholder: 'e.g. Smith AB, Jones CD' },
+  organization: { label: 'Organization / Institution', placeholder: 'e.g. World Health Organization, UNICEF' },
+  journal: { label: 'Journal name (abbreviated)', placeholder: 'e.g. Occup Ther Int' },
+  year: { label: 'Year', placeholder: 'e.g. 2023' },
+  volume: { label: 'Volume', placeholder: 'e.g. 19' },
+  issue: { label: 'Issue', placeholder: 'e.g. 3' },
+  pages: { label: 'Pages', placeholder: 'e.g. 127-34' },
+  doi: { label: 'DOI', placeholder: 'e.g. 10.1002/oti.1327' },
+  url: { label: 'URL', placeholder: 'https://...' },
+  city: { label: 'City / Place of publication', placeholder: 'e.g. Geneva, Stockholm' },
+  publisher: { label: 'Publisher', placeholder: 'e.g. Elsevier, WHO' },
+  edition: { label: 'Edition (if not 1st)', placeholder: 'e.g. 3rd' },
+  accessDate: { label: 'Date accessed (cited)', placeholder: 'e.g. 2025 Dec 08' },
+  newspaper: { label: 'Newspaper name', placeholder: 'e.g. The Guardian' },
+  newsDate: { label: 'Publication date', placeholder: 'e.g. 2024 Mar 15' },
+  reportSeries: { label: 'Series / Report number (optional)', placeholder: 'e.g. WHO/RHR/18.19' },
+  university: { label: 'University / Institution', placeholder: 'e.g. Karolinska Institutet' },
+};
 
 function App() {
   const [papers, setPapers] = useState(samplePapers);
@@ -30,6 +371,7 @@ function App() {
   const [selectedText, setSelectedText] = useState('');
   const [popupVisible, setPopupVisible] = useState(false);
   const [popupCoords, setPopupCoords] = useState({ top: 0, left: 0 });
+  const [webQuoteText, setWebQuoteText] = useState('');
   const [citationPopupVisible, setCitationPopupVisible] = useState(false);
   const [citationPaper, setCitationPaper] = useState(null);
   const [copiedFormat, setCopiedFormat] = useState(null);
@@ -37,330 +379,268 @@ function App() {
   const [referenceStyle, setReferenceStyle] = useState(null);
   const [generatedReferences, setGeneratedReferences] = useState('');
   const [referenceCopied, setReferenceCopied] = useState(false);
+  const [metadataFormVisible, setMetadataFormVisible] = useState(false);
+  const [metadataForm, setMetadataForm] = useState({ title: '', ...emptyMeta });
+  const [pendingPaper, setPendingPaper] = useState(null);
+  const [editingPaper, setEditingPaper] = useState(null);
+  const [fetchingMeta, setFetchingMeta] = useState(false);
+  const [fetchStatus, setFetchStatus] = useState('');
+  const [isNewWebSource, setIsNewWebSource] = useState(false);
+  const [urlDetecting, setUrlDetecting] = useState(false);
+
   const fileInputRef = useRef(null);
   const viewerRef = useRef(null);
   const citationPopupRef = useRef(null);
   const referencePopupRef = useRef(null);
 
+  const pdfFile = useMemo(() => selectedPaper.file, [selectedPaper.id]);
+  const isWebSource = selectedPaper.fileType === 'web';
+
   useEffect(() => {
     if (!viewerRef.current) return;
-
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        setPageWidth(Math.max(200, Math.floor(entry.contentRect.width)));
-      }
-    });
-
-    observer.observe(viewerRef.current);
-    return () => observer.disconnect();
+    const obs = new ResizeObserver(entries => { for (const e of entries) setPageWidth(Math.max(200, Math.floor(e.contentRect.width))); });
+    obs.observe(viewerRef.current);
+    return () => obs.disconnect();
   }, []);
 
   useEffect(() => {
     const onMouseUp = () => {
-      const selection = window.getSelection();
-      if (!selection || selection.isCollapsed) {
-        setPopupVisible(false);
-        return;
-      }
-
-      const text = selection.toString().trim();
-      if (!text) {
-        setPopupVisible(false);
-        return;
-      }
-
-      const range = selection.getRangeAt(0);
-      const rect = range.getBoundingClientRect();
-      const containerRect = viewerRef.current?.getBoundingClientRect();
-      if (!containerRect) {
-        setPopupVisible(false);
-        return;
-      }
-
+      const sel = window.getSelection();
+      if (!sel || sel.isCollapsed) { setPopupVisible(false); return; }
+      const text = sel.toString().trim();
+      if (!text) { setPopupVisible(false); return; }
+      const rect = sel.getRangeAt(0).getBoundingClientRect();
+      const cRect = viewerRef.current?.getBoundingClientRect();
+      if (!cRect) { setPopupVisible(false); return; }
       setSelectedText(text);
-      setPopupCoords({
-        top: rect.top - containerRect.top - 40,
-        left: rect.left - containerRect.left + rect.width / 2
-      });
+      setPopupCoords({ top: rect.top - cRect.top - 40, left: rect.left - cRect.left + rect.width / 2 });
       setPopupVisible(true);
     };
+    const v = viewerRef.current;
+    v?.addEventListener('mouseup', onMouseUp);
+    return () => v?.removeEventListener('mouseup', onMouseUp);
+  }, [pageNumber, isWebSource]);
 
-    const viewer = viewerRef.current;
-    viewer?.addEventListener('mouseup', onMouseUp);
-    return () => viewer?.removeEventListener('mouseup', onMouseUp);
-  }, [pageNumber]);
+  const handleUploadClick = () => fileInputRef.current?.click();
 
-  const handleUploadClick = () => {
-    fileInputRef.current?.click();
+  const handleAutoDetectURL = async () => {
+    const url = metadataForm.url?.trim();
+    if (!url) return;
+    setUrlDetecting(true);
+    setFetchStatus('🔍 Reading webpage to detect title, organization, year...');
+    const meta = await fetchWebpageMeta(url);
+    if (meta) {
+      setMetadataForm(prev => ({
+        ...prev,
+        title: meta.title || prev.title,
+        organization: meta.organization || prev.organization,
+        authors: meta.authors || prev.authors,
+        year: meta.year || prev.year,
+        accessDate: meta.accessDate || prev.accessDate,
+      }));
+      setFetchStatus('✅ Webpage details detected! Please check and confirm.');
+    } else {
+      setFetchStatus('⚠️ Could not auto-detect from this URL. Please fill in manually.');
+    }
+    setUrlDetecting(false);
   };
 
-  const handleFileUpload = (event) => {
+  const handleAddWebSource = () => {
+    setIsNewWebSource(true);
+    setMetadataForm({ title: '', ...emptyMeta, sourceType: 'webpage' });
+    setPendingPaper(null);
+    setEditingPaper(null);
+    setFetchStatus('💡 Paste the URL below and click Auto-detect to fill in details automatically.');
+    setMetadataFormVisible(true);
+  };
+
+  const handleFileUpload = async (event) => {
     const file = event.target.files?.[0];
-    if (!file || file.type !== 'application/pdf') {
-      alert('Please select a valid PDF file');
-      return;
-    }
-
+    if (!file || file.type !== 'application/pdf') { alert('Please select a valid PDF file'); return; }
     const fileUrl = URL.createObjectURL(file);
-    const newPaper = {
-      id: Date.now(),
-      title: file.name.replace('.pdf', ''),
-      file: fileUrl
-    };
+    const newPaper = { id: Date.now(), title: file.name.replace('.pdf', ''), file: fileUrl, fileType: 'pdf', ...emptyMeta };
+    setPendingPaper(newPaper);
+    setIsNewWebSource(false);
+    setFetchingMeta(true);
+    setFetchStatus('🔍 Reading PDF to find DOI...');
+    setMetadataForm({ title: newPaper.title, ...emptyMeta });
+    setMetadataFormVisible(true);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+    try {
+      const text = await extractTextFromPDF(fileUrl);
+      const doi = extractDOI(text);
+      if (doi) {
+        setFetchStatus('🔍 DOI found — searching databases...');
+        const result = await fetchMetadata(doi, setFetchStatus);
+        if (result) {
+          setMetadataForm(prev => ({ ...prev, ...result.meta, sourceType: 'journal' }));
+          setFetchStatus(`✅ Found via ${result.source}! Please check and confirm.`);
+        } else {
+          setMetadataForm(prev => ({ ...prev, doi }));
+          setFetchStatus('⚠️ DOI found but not in any database. DOI pre-filled.');
+        }
+      } else {
+        setFetchStatus('⚠️ No DOI found. Please fill in details manually.');
+      }
+    } catch { setFetchStatus('⚠️ Auto-detection failed. Please fill in manually.'); }
+    setFetchingMeta(false);
+  };
 
-    setPapers((prev) => [newPaper, ...prev]);
-    setSelectedPaper(newPaper);
-    setPageNumber(1);
-    setNumPages(null);
-    setSelectedText('');
-    setPopupVisible(false);
-
-    if (fileInputRef.current) {
-      fileInputRef.current.value = '';
+  const handleMetadataSave = () => {
+    if (isNewWebSource) {
+      // Creating a new web source — no PDF file
+      const newWebSource = {
+        id: Date.now(),
+        title: metadataForm.title || 'Web source',
+        file: null,
+        fileType: 'web',
+        ...metadataForm
+      };
+      setPapers(prev => [newWebSource, ...prev]);
+      setSelectedPaper(newWebSource);
+      setWebQuoteText('');
+      setIsNewWebSource(false);
+    } else {
+      const paperWithMeta = { ...(editingPaper || pendingPaper), ...metadataForm };
+      if (editingPaper) {
+        setPapers(prev => prev.map(p => p.id === editingPaper.id ? paperWithMeta : p));
+        if (selectedPaper.id === editingPaper.id) setSelectedPaper(paperWithMeta);
+        setEditingPaper(null);
+      } else {
+        setPapers(prev => [paperWithMeta, ...prev]);
+        setSelectedPaper(paperWithMeta);
+        setPageNumber(1); setNumPages(null); setPendingPaper(null);
+      }
     }
+    setMetadataFormVisible(false); setFetchStatus('');
+  };
+
+  const handleMetadataSkip = () => {
+    if (isNewWebSource) { setIsNewWebSource(false); }
+    else if (editingPaper) { setEditingPaper(null); }
+    else if (pendingPaper) {
+      setPapers(prev => [pendingPaper, ...prev]);
+      setSelectedPaper(pendingPaper);
+      setPageNumber(1); setNumPages(null); setPendingPaper(null);
+    }
+    setMetadataFormVisible(false); setFetchStatus('');
+  };
+
+  const handleEditPaper = (e, paper) => {
+    e.stopPropagation();
+    setEditingPaper(paper);
+    setIsNewWebSource(false);
+    setFetchStatus('');
+    setMetadataForm({ title: paper.title, ...emptyMeta, ...paper });
+    setMetadataFormVisible(true);
   };
 
   const handleSelectPaper = (paper) => {
-    setSelectedPaper(paper);
-    setPageNumber(1);
-    setNumPages(null);
-    setSelectedText('');
-    setPopupVisible(false);
+    setSelectedPaper(paper); setPageNumber(1); setNumPages(null);
+    setSelectedText(''); setPopupVisible(false);
+    setWebQuoteText('');
     window.getSelection()?.removeAllRanges();
   };
 
-  const onDocumentLoadSuccess = ({ numPages: nextNumPages }) => {
-    setNumPages(nextNumPages);
-    if (pageNumber > nextNumPages) {
-      setPageNumber(nextNumPages);
-    }
-  };
+  const onDocumentLoadSuccess = ({ numPages: n }) => { setNumPages(n); if (pageNumber > n) setPageNumber(n); };
 
   const handleSaveSelection = () => {
     if (!selectedText) return;
-
-    // capture absolute Y position of selection for later scrolling
     let selY = null;
-    try {
-      const sel = window.getSelection();
-      if (sel && sel.rangeCount > 0) {
-        const r = sel.getRangeAt(0);
-        const rRect = r.getBoundingClientRect();
-        selY = rRect.top;
+    try { const s = window.getSelection(); if (s?.rangeCount > 0) selY = s.getRangeAt(0).getBoundingClientRect().top; } catch {}
+    setNotes(prev => [{ id: Date.now(), text: selectedText, page: pageNumber, paperName: selectedPaper.title, paperUrl: selectedPaper.url || null, fileType: selectedPaper.fileType || 'pdf', y: selY }, ...prev]);
+    setSelectedText(''); setPopupVisible(false); window.getSelection()?.removeAllRanges();
+  };
+
+  const handleSaveWebQuote = () => {
+    if (!webQuoteText.trim()) return;
+    setNotes(prev => [{ id: Date.now(), text: webQuoteText.trim(), page: null, paperName: selectedPaper.title, paperUrl: selectedPaper.url || null, fileType: 'web', y: null }, ...prev]);
+    setWebQuoteText('');
+  };
+
+  const handleNoteClick = (note) => {
+    if (note.fileType === 'web' && note.paperUrl) {
+      // Open URL in new tab to verify source
+      window.open(note.paperUrl, '_blank', 'noopener,noreferrer');
+    } else if (note.fileType === 'pdf') {
+      // Jump to page in PDF
+      setPageNumber(note.page);
+      if (note.y && viewerRef.current) {
+        setTimeout(() => {
+          const cr = viewerRef.current.getBoundingClientRect();
+          viewerRef.current.scrollTop += Math.max(0, note.y - cr.top - 20);
+        }, 200);
       }
-    } catch (e) {
-      selY = null;
     }
-
-    setNotes((prev) => [
-      { id: Date.now(), text: selectedText, page: pageNumber, paperName: selectedPaper.title, y: selY },
-      ...prev
-    ]);
-
-    setSelectedText('');
-    setPopupVisible(false);
-    window.getSelection()?.removeAllRanges();
   };
 
-  const handleCancelSelection = () => {
-    setSelectedText('');
-    setPopupVisible(false);
-    window.getSelection()?.removeAllRanges();
-  };
+  const handleCancelSelection = () => { setSelectedText(''); setPopupVisible(false); window.getSelection()?.removeAllRanges(); };
+  const handleDeleteNote = (id) => setNotes(prev => prev.filter(n => n.id !== id));
+  const handlePreviousPage = () => { setPageNumber(prev => Math.max(1, prev - 1)); setPopupVisible(false); };
+  const handleNextPage = () => { if (!numPages) return; setPageNumber(prev => Math.min(numPages, prev + 1)); setPopupVisible(false); };
+  const handleZoomIn = () => setZoom(prev => prev + 0.2);
+  const handleZoomOut = () => setZoom(prev => Math.max(0.2, prev - 0.2));
 
-  const handleDeleteNote = (noteId) => {
-    setNotes((prev) => prev.filter((note) => note.id !== noteId));
-  };
-
-  const handlePreviousPage = () => {
-    setPageNumber((prev) => Math.max(1, prev - 1));
-    setPopupVisible(false);
-  };
-
-  const handleNextPage = () => {
-    if (!numPages) return;
-    setPageNumber((prev) => Math.min(numPages, prev + 1));
-    setPopupVisible(false);
-  };
-
-  const handleZoomIn = () => {
-    setZoom((prev) => prev + 0.2);
-  };
-
-  const handleZoomOut = () => {
-    setZoom((prev) => Math.max(0.2, prev - 0.2));
-  };
-
-  const generateCitations = (paper) => {
-    const title = paper.title;
-    const apa = `Author, A., & Author, B. (Year). ${title}. Publisher.`;
-    const mla = `Author, A., and B. Author. "${title}." Publisher, Year.`;
-    const vancouver = `Author A, Author B. ${title}. Publisher; Year.`;
-    return { apa, mla, vancouver };
-  };
-
-  const handleCiteClick = (e, paper) => {
-    e.stopPropagation();
-    setCitationPaper(paper);
-    setCitationPopupVisible(true);
-  };
-
-  const handleCloseCitationPopup = () => {
-    setCitationPopupVisible(false);
-  };
-
-  const handleCopyCitation = (text) => {
-    navigator.clipboard.writeText(text);
-    setCopiedFormat(text);
-    setTimeout(() => {
-      setCopiedFormat(null);
-    }, 2000);
-  };
+  const handleCiteClick = (e, paper) => { e.stopPropagation(); setCitationPaper(paper); setCitationPopupVisible(true); };
+  const handleCloseCitationPopup = () => setCitationPopupVisible(false);
+  const handleCopyCitation = (text) => { navigator.clipboard.writeText(text); setCopiedFormat(text); setTimeout(() => setCopiedFormat(null), 2000); };
 
   useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (citationPopupRef.current && !citationPopupRef.current.contains(event.target)) {
-        handleCloseCitationPopup();
-      }
-    };
-
-    if (citationPopupVisible) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
-
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
+    const h = e => { if (citationPopupRef.current && !citationPopupRef.current.contains(e.target)) handleCloseCitationPopup(); };
+    if (citationPopupVisible) document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
   }, [citationPopupVisible]);
 
+  const getPaperRefNum = (paperName) => {
+    const seen = [];
+    for (const n of notes) { if (!seen.includes(n.paperName)) seen.push(n.paperName); }
+    return seen.indexOf(paperName) + 1;
+  };
+
   const generateReferenceList = (style) => {
-    // Get unique papers from notes
-    const uniquePapers = Array.from(
-      new Map(notes.map((note) => [note.paperName, note.paperName])).values()
-    );
-
-    let referenceText = '';
-    if (style === 'apa') {
-      referenceText = uniquePapers
-        .map((paper, idx) => `[${idx + 1}] Author, A., & Author, B. (Year). ${paper}. Publisher.`)
-        .join('\n');
-    } else if (style === 'mla') {
-      referenceText = uniquePapers
-        .map((paper, idx) => `[${idx + 1}] Author, A., and B. Author. "${paper}." Publisher, Year.`)
-        .join('\n');
-    } else if (style === 'vancouver') {
-      referenceText = uniquePapers
-        .map((paper, idx) => `[${idx + 1}] Author A, Author B. ${paper}. Publisher; Year.`)
-        .join('\n');
-    }
-
-    setGeneratedReferences(referenceText);
+    const seen = [];
+    for (const n of notes) { if (!seen.includes(n.paperName)) seen.push(n.paperName); }
+    let uniquePapers = seen.map(name => papers.find(p => p.title === name) || { ...emptyMeta, title: name });
+    if (style === 'apa') uniquePapers = [...uniquePapers].sort((a, b) => (a.authors || a.organization || a.title).localeCompare(b.authors || b.organization || b.title));
+    const cites = uniquePapers.map((p, i) => {
+      const c = generateCitations(p);
+      return `${i + 1}. ${style === 'apa' ? c.apa : style === 'mla' ? c.mla : c.vancouver}`;
+    });
+    setGeneratedReferences(cites.join('\n\n'));
   };
 
-  const handleGenerateReferences = () => {
-    setReferencePopupVisible(true);
-    setReferenceStyle(null);
-  };
-
-  const handleSelectReferenceStyle = (style) => {
-    setReferenceStyle(style);
-    generateReferenceList(style);
-  };
-
-  const handleCloseReferencePopup = () => {
-    setReferencePopupVisible(false);
-    setReferenceStyle(null);
-    setGeneratedReferences('');
-  };
-
-  const handleCopyReferences = () => {
-    navigator.clipboard.writeText(generatedReferences);
-    setReferenceCopied(true);
-    setTimeout(() => {
-      setReferenceCopied(false);
-    }, 2000);
-  };
-
-  const getPaperReferenceNumber = (paperName) => {
-    const seenPapers = [];
-    for (const note of notes) {
-      if (!seenPapers.includes(note.paperName)) {
-        seenPapers.push(note.paperName);
-      }
-    }
-    return seenPapers.indexOf(paperName) + 1;
-  };
+  const handleGenerateReferences = () => { setReferencePopupVisible(true); setReferenceStyle(null); };
+  const handleSelectReferenceStyle = (style) => { setReferenceStyle(style); generateReferenceList(style); };
+  const handleCloseReferencePopup = () => { setReferencePopupVisible(false); setReferenceStyle(null); setGeneratedReferences(''); };
+  const handleCopyReferences = () => { navigator.clipboard.writeText(generatedReferences); setReferenceCopied(true); setTimeout(() => setReferenceCopied(false), 2000); };
 
   useEffect(() => {
-    const handleClickOutsideRef = (event) => {
-      if (referencePopupRef.current && !referencePopupRef.current.contains(event.target)) {
-        handleCloseReferencePopup();
-      }
-    };
-
-    if (referencePopupVisible) {
-      document.addEventListener('mousedown', handleClickOutsideRef);
-    }
-
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutsideRef);
-    };
+    const h = e => { if (referencePopupRef.current && !referencePopupRef.current.contains(e.target)) handleCloseReferencePopup(); };
+    if (referencePopupVisible) document.addEventListener('mousedown', h);
+    return () => document.removeEventListener('mousedown', h);
   }, [referencePopupVisible]);
+
+  const currentFields = FIELDS[metadataForm.sourceType] || FIELDS.journal;
 
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="sidebar-header">
-          <h1>Research Tool</h1>
-          <p>Uploaded papers</p>
-        </div>
+        <div className="sidebar-header"><h1>Research Tool</h1><p>Uploaded papers</p></div>
 
-        <button className="upload-button" onClick={handleUploadClick}>
-          + Upload PDF
+        <button className="upload-button" onClick={handleUploadClick}>+ Upload PDF</button>
+        <button onClick={handleAddWebSource} style={{ width: '100%', background: 'none', border: '1px solid rgba(255,255,255,0.2)', color: '#e5e7eb', padding: '8px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.85rem', marginTop: '8px', marginBottom: '4px' }}>
+          🌐 Add Web Source
         </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".pdf"
-          onChange={handleFileUpload}
-          style={{ display: 'none' }}
-        />
+        <input ref={fileInputRef} type="file" accept=".pdf" onChange={handleFileUpload} style={{ display: 'none' }} />
 
         <div className="paper-list">
-          {papers.map((paper) => (
-            <div
-              key={paper.id}
-              style={{
-                display: 'flex',
-                gap: '6px',
-                alignItems: 'center',
-                marginBottom: '6px'
-              }}
-            >
-              <button
-                className={`paper-item ${selectedPaper.id === paper.id ? 'active' : ''}`}
-                onClick={() => handleSelectPaper(paper)}
-                style={{ flex: 1 }}
-              >
-                {paper.title}
+          {papers.map(paper => (
+            <div key={paper.id} style={{ display: 'flex', gap: '4px', alignItems: 'center', marginBottom: '6px' }}>
+              <button className={`paper-item ${selectedPaper.id === paper.id ? 'active' : ''}`} onClick={() => handleSelectPaper(paper)} style={{ flex: 1, textAlign: 'left' }}>
+                {paper.fileType === 'web' ? '🌐 ' : ''}{paper.title}
               </button>
-              <button
-                onClick={(e) => handleCiteClick(e, paper)}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  color: '#e5e7eb',
-                  cursor: 'pointer',
-                  fontSize: '0.75rem',
-                  padding: '4px 8px',
-                  borderRadius: '4px',
-                  transition: 'background 0.2s ease'
-                }}
-                onMouseOver={(e) => (e.target.style.background = 'rgba(255, 255, 255, 0.1)')}
-                onMouseOut={(e) => (e.target.style.background = 'none')}
-              >
-                Cite
-              </button>
+              <button onClick={e => handleEditPaper(e, paper)} title="Edit metadata" style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', fontSize: '0.85rem', padding: '4px 5px', borderRadius: '4px' }} onMouseOver={e => e.target.style.color = '#fff'} onMouseOut={e => e.target.style.color = '#9ca3af'}>✏️</button>
+              <button onClick={e => handleCiteClick(e, paper)} style={{ background: 'none', border: 'none', color: '#e5e7eb', cursor: 'pointer', fontSize: '0.75rem', padding: '4px 8px', borderRadius: '4px' }} onMouseOver={e => e.target.style.background = 'rgba(255,255,255,0.1)'} onMouseOut={e => e.target.style.background = 'none'}>Cite</button>
             </div>
           ))}
         </div>
@@ -370,407 +650,244 @@ function App() {
         <div className="viewer-header">
           <div>
             <h2>{selectedPaper.title}</h2>
-            <p>Page {pageNumber}{numPages ? ` of ${numPages}` : ''}</p>
+            {isWebSource ? (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <p style={{ margin: 0 }}>🌐 Web source</p>
+                {selectedPaper.url && (
+                  <a href={selectedPaper.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: '0.78rem', color: '#2563eb', textDecoration: 'none' }}>
+                    Open website ↗
+                  </a>
+                )}
+              </div>
+            ) : (
+              <p>Page {pageNumber}{numPages ? ` of ${numPages}` : ''}</p>
+            )}
           </div>
         </div>
 
-        <div className="pdf-container" ref={viewerRef}>
-          <Document file={selectedPaper.file} onLoadSuccess={onDocumentLoadSuccess}>
-            <div style={{ transform: `scale(${1 / window.devicePixelRatio})`, transformOrigin: 'top left' }}>
-              <Page
-                pageNumber={pageNumber}
-                width={pageWidth * zoom * window.devicePixelRatio}
-                renderTextLayer={true}
-                renderAnnotationLayer={false}
-                devicePixelRatio={window.devicePixelRatio}
+        {isWebSource ? (
+          /* Web source view — paste quotes here */
+          <div style={{ flex: 1, padding: '24px', display: 'flex', flexDirection: 'column', gap: '16px', overflowY: 'auto' }}>
+
+            {selectedPaper.url && (
+              <div style={{ background: '#eff6ff', border: '1px solid #bfdbfe', borderRadius: '8px', padding: '12px 14px' }}>
+                <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#1d4ed8', marginBottom: '4px' }}>Source URL</div>
+                <a href={selectedPaper.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: '0.82rem', color: '#2563eb', wordBreak: 'break-all' }}>
+                  {selectedPaper.url}
+                </a>
+                <div style={{ fontSize: '0.75rem', color: '#6b7280', marginTop: '4px' }}>Click to verify the source is correct ↗</div>
+              </div>
+            )}
+
+            <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '16px' }}>
+              <div style={{ fontSize: '0.85rem', fontWeight: '600', color: '#374151', marginBottom: '8px' }}>Paste or type a quote from this website</div>
+              <textarea
+                value={webQuoteText}
+                onChange={e => setWebQuoteText(e.target.value)}
+                placeholder="Paste the text you want to save from this web page..."
+                style={{ width: '100%', minHeight: '120px', padding: '10px', border: '1px solid #d1d5db', borderRadius: '6px', fontSize: '0.85rem', resize: 'vertical', boxSizing: 'border-box', fontFamily: 'inherit', lineHeight: '1.6' }}
               />
-            </div>
-          </Document>
-
-          {popupVisible && (
-            <div
-              className="selection-popup"
-              style={{
-                position: 'absolute',
-                top: popupCoords.top,
-                left: popupCoords.left,
-                transform: 'translate(-50%, -100%)',
-                zIndex: 20,
-                display: 'flex',
-                gap: '8px',
-                background: 'rgba(255,255,255,0.96)',
-                border: '1px solid rgba(156,163,175,0.35)',
-                borderRadius: '12px',
-                padding: '8px',
-                boxShadow: '0 16px 40px rgba(15,23,42,0.18)'
-              }}
-            >
-              <button
-                className="page-button"
-                onClick={handleSaveSelection}
-                style={{ padding: '4px 10px', fontSize: '0.8rem', borderRadius: '6px' }}
-              >
-                Save
-              </button>
-              <button
-                className="page-button"
-                onClick={handleCancelSelection}
-                style={{ padding: '4px 10px', fontSize: '0.8rem', borderRadius: '6px' }}
-              >
-                Cancel
+              <button onClick={handleSaveWebQuote} disabled={!webQuoteText.trim()} style={{ marginTop: '10px', background: webQuoteText.trim() ? '#2563eb' : '#93c5fd', color: '#fff', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: webQuoteText.trim() ? 'pointer' : 'not-allowed', fontSize: '0.85rem', fontWeight: '600' }}>
+                Save to Smart Notes
               </button>
             </div>
-          )}
-        </div>
 
-        <div className="page-controls">
-          <button className="page-button" onClick={handlePreviousPage} disabled={pageNumber === 1}>
-            ← Previous
-          </button>
-          <button className="page-button" onClick={handleNextPage} disabled={!numPages || pageNumber === numPages}>
-            Next →
-          </button>
-          <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <button className="page-button" onClick={handleZoomOut}>−</button>
-            <span style={{ minWidth: '50px', textAlign: 'center', fontSize: '0.85rem' }}>{Math.round(zoom * 100)}%</span>
-            <button className="page-button" onClick={handleZoomIn}>+</button>
+            <div style={{ fontSize: '0.8rem', color: '#6b7280', background: '#f9fafb', border: '1px dashed #e5e7eb', borderRadius: '8px', padding: '12px 14px', lineHeight: '1.6' }}>
+              💡 <strong>Tip:</strong> Go to the website, copy the sentence you want to cite, paste it above and click Save. When you click the saved note in Smart Notes, it will open the website in your browser so you can verify the source.
+            </div>
           </div>
-        </div>
+        ) : (
+          /* PDF view */
+          <div className="pdf-container" ref={viewerRef} style={{ overflowX: 'auto', overflowY: 'auto' }}>
+            <Document file={pdfFile} onLoadSuccess={onDocumentLoadSuccess}>
+              <div style={{ display: 'inline-block' }}>
+                <Page pageNumber={pageNumber} width={pageWidth * zoom} renderTextLayer={true} renderAnnotationLayer={false} />
+              </div>
+            </Document>
+            {popupVisible && (
+              <div style={{ position: 'absolute', top: popupCoords.top, left: popupCoords.left, transform: 'translate(-50%,-100%)', zIndex: 20, display: 'flex', gap: '8px', background: 'rgba(255,255,255,0.96)', border: '1px solid rgba(156,163,175,0.35)', borderRadius: '12px', padding: '8px', boxShadow: '0 16px 40px rgba(15,23,42,0.18)' }}>
+                <button className="page-button" onClick={handleSaveSelection} style={{ padding: '4px 10px', fontSize: '0.8rem', borderRadius: '6px' }}>Save</button>
+                <button className="page-button" onClick={handleCancelSelection} style={{ padding: '4px 10px', fontSize: '0.8rem', borderRadius: '6px' }}>Cancel</button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {!isWebSource && (
+          <div className="page-controls">
+            <button className="page-button" onClick={handlePreviousPage} disabled={pageNumber === 1}>← Previous</button>
+            <button className="page-button" onClick={handleNextPage} disabled={!numPages || pageNumber === numPages}>Next →</button>
+            <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button className="page-button" onClick={handleZoomOut}>−</button>
+              <span style={{ minWidth: '50px', textAlign: 'center', fontSize: '0.85rem' }}>{Math.round(zoom * 100)}%</span>
+              <button className="page-button" onClick={handleZoomIn}>+</button>
+            </div>
+          </div>
+        )}
       </main>
 
       <aside className="notes-panel">
-        <div className="notes-header">
-          <h2>Smart Notes</h2>
-          <p>Saved text selections appear here.</p>
-        </div>
-
+        <div className="notes-header"><h2>Smart Notes</h2><p>Saved text selections appear here.</p></div>
         <div className="notes-list">
-          {notes.length === 0 ? (
-            <div className="notes-empty">No saved selections yet. Select text and save it.</div>
-          ) : (
-            notes.map((note, index) => (
-              <div
-                key={note.id}
-                className="note-card"
-                style={{ position: 'relative' }}
-                onClick={() => {
-                  setPageNumber(note.page);
-                  if (note.y && viewerRef.current) {
-                    // wait a bit for the page to render then scroll container
-                    setTimeout(() => {
-                      const containerRect = viewerRef.current.getBoundingClientRect();
-                      const offset = Math.max(0, note.y - containerRect.top - 20);
-                      viewerRef.current.scrollTop += offset;
-                    }, 200);
-                  }
-                }}
-              >
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start', marginBottom: '8px' }}>
-                  <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#2563eb', minWidth: '24px' }}>
-                    [{getPaperReferenceNumber(note.paperName)}]
-                  </div>
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteNote(note.id);
-                    }}
-                    style={{
-                      position: 'absolute',
-                      top: '4px',
-                      right: '4px',
-                      background: 'none',
-                      border: 'none',
-                      color: '#999',
-                      cursor: 'pointer',
-                      fontSize: '0.9rem',
-                      padding: '2px',
-                      lineHeight: '1',
-                      zIndex: 10
-                    }}
-                    aria-label="Delete note"
-                  >
-                    ×
-                  </button>
+          {notes.length === 0 ? <div className="notes-empty">No saved selections yet. Select text from a PDF or paste a web quote.</div> : notes.map(note => (
+            <div key={note.id} className="note-card" style={{ position: 'relative', cursor: 'pointer' }} onClick={() => handleNoteClick(note)}>
+              <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#2563eb', marginBottom: '4px' }}>[{getPaperRefNum(note.paperName)}]</div>
+              <button onClick={e => { e.stopPropagation(); handleDeleteNote(note.id); }} style={{ position: 'absolute', top: '4px', right: '4px', background: 'none', border: 'none', color: '#999', cursor: 'pointer', fontSize: '1rem', padding: '2px 6px', borderRadius: '4px' }} onMouseOver={e => { e.target.style.color = '#ef4444'; e.target.style.background = '#fee2e2'; }} onMouseOut={e => { e.target.style.color = '#999'; e.target.style.background = 'none'; }}>×</button>
+              {note.fileType === 'web' ? (
+                <div style={{ fontSize: '0.72rem', color: '#2563eb', marginBottom: '4px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  🌐 Web source — <span style={{ textDecoration: 'underline' }}>click to open ↗</span>
                 </div>
+              ) : (
                 <div className="note-page">Page {note.page}</div>
-                <div style={{ fontSize: '0.75rem', color: '#999', marginBottom: '8px' }}>{note.paperName}</div>
-                <p>{note.text}</p>
-              </div>
-            ))
-          )}
+              )}
+              <div style={{ fontSize: '0.75rem', color: '#999', marginBottom: '6px' }}>{note.paperName}</div>
+              <p>{note.text}</p>
+            </div>
+          ))}
         </div>
-
-        {notes.length > 0 && (
-          <button
-            onClick={handleGenerateReferences}
-            style={{
-              width: '100%',
-              border: '1px solid #d1d5db',
-              background: '#2563eb',
-              color: '#ffffff',
-              padding: '8px 12px',
-              borderRadius: '8px',
-              cursor: 'pointer',
-              fontSize: '0.85rem',
-              fontWeight: '600',
-              marginTop: '12px'
-            }}
-          >
-            Generate References
-          </button>
-        )}
+        {notes.length > 0 && <button onClick={handleGenerateReferences} style={{ width: '100%', background: '#2563eb', color: '#fff', border: 'none', padding: '8px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.85rem', fontWeight: '600', marginTop: '12px' }}>Generate References</button>}
       </aside>
 
-      {citationPopupVisible && citationPaper && (
-        <div
-          style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: 'rgba(0, 0, 0, 0.5)',
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center',
-            zIndex: 1000
-          }}
-        >
-          <div
-            ref={citationPopupRef}
-            style={{
-              background: '#ffffff',
-              padding: '24px',
-              borderRadius: '12px',
-              maxWidth: '500px',
-              boxShadow: '0 20px 60px rgba(0, 0, 0, 0.3)',
-              maxHeight: '80vh',
-              overflow: 'auto'
-            }}
-          >
-            <h3 style={{ marginTop: 0, marginBottom: '16px' }}>Citation for: {citationPaper.title}</h3>
+      {/* METADATA FORM */}
+      {metadataFormVisible && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 2000 }}>
+          <div style={{ background: '#fff', padding: '24px', borderRadius: '12px', width: '500px', maxWidth: '92vw', boxShadow: '0 20px 60px rgba(0,0,0,0.3)', maxHeight: '92vh', overflow: 'auto' }}>
+            <h3 style={{ marginTop: 0, marginBottom: '6px', fontSize: '1.1rem' }}>{editingPaper ? 'Edit Source Details' : isNewWebSource ? 'Add Web Source' : 'Source Details'}</h3>
+            {fetchStatus && (
+              <div style={{ padding: '8px 12px', borderRadius: '6px', marginBottom: '12px', fontSize: '0.82rem', background: fetchStatus.startsWith('✅') ? '#ecfdf5' : fetchStatus.startsWith('🔍') ? '#eff6ff' : '#fef3c7', color: fetchStatus.startsWith('✅') ? '#065f46' : fetchStatus.startsWith('🔍') ? '#1e40af' : '#92400e', border: `1px solid ${fetchStatus.startsWith('✅') ? '#6ee7b7' : fetchStatus.startsWith('🔍') ? '#93c5fd' : '#fcd34d'}` }}>
+                {fetchStatus}
+              </div>
+            )}
+            <div style={{ marginBottom: '14px' }}>
+              <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: '600', marginBottom: '6px', color: '#374151' }}>Source Type</label>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '6px' }}>
+                {SOURCE_TYPES.map(({ value, label }) => (
+                  <button key={value} onClick={() => setMetadataForm(prev => ({ ...prev, sourceType: value }))}
+                    style={{ padding: '7px 6px', borderRadius: '6px', border: `2px solid ${metadataForm.sourceType === value ? '#2563eb' : '#e5e7eb'}`, background: metadataForm.sourceType === value ? '#eff6ff' : '#f9fafb', color: metadataForm.sourceType === value ? '#1d4ed8' : '#374151', cursor: 'pointer', fontSize: '0.75rem', fontWeight: metadataForm.sourceType === value ? '600' : '400' }}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div style={{ marginBottom: '10px' }}>
+              <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: '600', marginBottom: '3px', color: '#374151' }}>Title</label>
+              <input type="text" value={metadataForm.title || ''} onChange={e => setMetadataForm(prev => ({ ...prev, title: e.target.value }))} placeholder="Title of the source"
+                style={{ width: '100%', padding: '7px 10px', border: '1px solid #d1d5db', borderRadius: '6px', fontSize: '0.85rem', boxSizing: 'border-box' }} />
+            </div>
+            {metadataForm.sourceType === 'thesis' && (
+              <div style={{ marginBottom: '10px' }}>
+                <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: '600', marginBottom: '6px', color: '#374151' }}>Thesis Type</label>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  {[{ value: 'master', label: "Master's thesis" }, { value: 'doctoral', label: 'Doctoral dissertation' }].map(({ value, label }) => (
+                    <button key={value} onClick={() => setMetadataForm(prev => ({ ...prev, thesisType: value }))}
+                      style={{ flex: 1, padding: '7px', borderRadius: '6px', border: `2px solid ${metadataForm.thesisType === value ? '#2563eb' : '#e5e7eb'}`, background: metadataForm.thesisType === value ? '#eff6ff' : '#f9fafb', color: metadataForm.thesisType === value ? '#1d4ed8' : '#374151', cursor: 'pointer', fontSize: '0.8rem', fontWeight: metadataForm.thesisType === value ? '600' : '400' }}>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            {currentFields.map(key => {
+              const cfg = FIELD_CONFIG[key];
+              if (!cfg) return null;
+              const isURLField = key === 'url';
+              return (
+                <div key={key} style={{ marginBottom: '10px' }}>
+                  <label style={{ display: 'block', fontSize: '0.78rem', fontWeight: '600', marginBottom: '3px', color: '#374151' }}>{cfg.label}</label>
+                  <div style={{ display: 'flex', gap: '6px' }}>
+                    <input type="text" value={metadataForm[key] || ''} onChange={e => setMetadataForm(prev => ({ ...prev, [key]: e.target.value }))} placeholder={cfg.placeholder}
+                      style={{ flex: 1, padding: '7px 10px', border: '1px solid #d1d5db', borderRadius: '6px', fontSize: '0.85rem', boxSizing: 'border-box' }} />
+                    {isURLField && (metadataForm.sourceType === 'webpage' || metadataForm.sourceType === 'report') && (
+                      <button onClick={handleAutoDetectURL} disabled={!metadataForm.url?.trim() || urlDetecting}
+                        style={{ padding: '7px 10px', background: metadataForm.url?.trim() ? '#2563eb' : '#e5e7eb', color: metadataForm.url?.trim() ? '#fff' : '#9ca3af', border: 'none', borderRadius: '6px', cursor: metadataForm.url?.trim() ? 'pointer' : 'not-allowed', fontSize: '0.75rem', fontWeight: '600', whiteSpace: 'nowrap' }}>
+                        {urlDetecting ? '...' : '🔍 Auto-detect'}
+                      </button>
+                    )}
+                  </div>
+                  {isURLField && (metadataForm.sourceType === 'webpage' || metadataForm.sourceType === 'report') && (
+                    <div style={{ fontSize: '0.72rem', color: '#6b7280', marginTop: '3px' }}>Paste the URL first then click Auto-detect to fill in title, organization and year automatically</div>
+                  )}
+                </div>
+              );
+            })}
+            {(metadataForm.authors || metadataForm.organization) && (
+              <div style={{ background: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '6px', padding: '10px 12px', marginBottom: '14px' }}>
+                <div style={{ fontSize: '0.75rem', fontWeight: '600', color: '#64748b', marginBottom: '6px' }}>Preview (Vancouver)</div>
+                <div style={{ fontSize: '0.78rem', color: '#1e293b', lineHeight: '1.5' }}>{generateCitations({ ...metadataForm, title: metadataForm.title || 'Title' }).vancouver}</div>
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: '10px', marginTop: '4px' }}>
+              <button onClick={handleMetadataSave} disabled={fetchingMeta} style={{ flex: 1, background: fetchingMeta ? '#93c5fd' : '#2563eb', color: '#fff', border: 'none', padding: '10px', borderRadius: '8px', cursor: fetchingMeta ? 'wait' : 'pointer', fontSize: '0.9rem', fontWeight: '600' }}>
+                {fetchingMeta ? 'Searching...' : isNewWebSource ? 'Add Web Source' : 'Save Details'}
+              </button>
+              <button onClick={handleMetadataSkip} style={{ flex: 1, background: '#f3f4f6', color: '#374151', border: '1px solid #d1d5db', padding: '10px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.9rem' }}>
+                {isNewWebSource ? 'Cancel' : 'Skip'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
+      {/* CITATION POPUP */}
+      {citationPopupVisible && citationPaper && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
+          <div ref={citationPopupRef} style={{ background: '#fff', padding: '24px', borderRadius: '12px', maxWidth: '520px', width: '92vw', boxShadow: '0 20px 60px rgba(0,0,0,0.3)', maxHeight: '80vh', overflow: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <h3 style={{ margin: 0, fontSize: '1rem' }}>Citation: {citationPaper.title}</h3>
+              <button onClick={handleCloseCitationPopup} style={{ background: 'none', border: 'none', fontSize: '1.5rem', color: '#999', cursor: 'pointer' }}>×</button>
+            </div>
+            {!citationPaper.authors && !citationPaper.organization && (
+              <div style={{ background: '#fef3c7', border: '1px solid #f59e0b', borderRadius: '6px', padding: '8px 12px', marginBottom: '16px', fontSize: '0.8rem', color: '#92400e' }}>
+                ⚠️ No metadata yet. Click ✏️ to add source details for a complete citation.
+              </div>
+            )}
             {(() => {
               const cites = generateCitations(citationPaper);
-              return (
-                <>
-                  <div style={{ marginBottom: '16px' }}>
-                    <div style={{ fontSize: '0.85rem', fontWeight: '600', marginBottom: '6px' }}>APA</div>
-                    <div style={{ fontSize: '0.8rem', background: '#f3f4f6', padding: '8px', borderRadius: '6px', marginBottom: '8px' }}>
-                      {cites.apa}
-                    </div>
+              return ['APA 7', 'Vancouver', 'MLA'].map(style => {
+                const key = style === 'APA 7' ? 'apa' : style === 'Vancouver' ? 'vancouver' : 'mla';
+                return (
+                  <div key={style} style={{ marginBottom: '16px' }}>
+                    <div style={{ fontSize: '0.85rem', fontWeight: '600', marginBottom: '6px', color: '#374151' }}>{style}</div>
+                    <div style={{ fontSize: '0.8rem', background: '#f8fafc', padding: '10px', borderRadius: '6px', marginBottom: '8px', lineHeight: '1.6', color: '#1e293b' }}>{cites[key]}</div>
                     <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                      <button
-                        onClick={() => handleCopyCitation(cites.apa)}
-                        style={{
-                          background: '#2563eb',
-                          color: '#ffffff',
-                          border: 'none',
-                          padding: '6px 12px',
-                          borderRadius: '6px',
-                          cursor: 'pointer',
-                          fontSize: '0.8rem'
-                        }}
-                      >
-                        Copy
-                      </button>
-                      {copiedFormat === cites.apa && (
-                        <span style={{ fontSize: '0.8rem', color: '#10b981', fontWeight: '600' }}>Copied!</span>
-                      )}
+                      <button onClick={() => handleCopyCitation(cites[key])} style={{ background: '#2563eb', color: '#fff', border: 'none', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', fontSize: '0.8rem' }}>Copy</button>
+                      {copiedFormat === cites[key] && <span style={{ fontSize: '0.8rem', color: '#10b981', fontWeight: '600' }}>✓ Copied!</span>}
                     </div>
                   </div>
-
-                  <div style={{ marginBottom: '16px' }}>
-                    <div style={{ fontSize: '0.85rem', fontWeight: '600', marginBottom: '6px' }}>MLA</div>
-                    <div style={{ fontSize: '0.8rem', background: '#f3f4f6', padding: '8px', borderRadius: '6px', marginBottom: '8px' }}>
-                      {cites.mla}
-                    </div>
-                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                      <button
-                        onClick={() => handleCopyCitation(cites.mla)}
-                        style={{
-                          background: '#2563eb',
-                          color: '#ffffff',
-                          border: 'none',
-                          padding: '6px 12px',
-                          borderRadius: '6px',
-                          cursor: 'pointer',
-                          fontSize: '0.8rem'
-                        }}
-                      >
-                        Copy
-                      </button>
-                      {copiedFormat === cites.mla && (
-                        <span style={{ fontSize: '0.8rem', color: '#10b981', fontWeight: '600' }}>Copied!</span>
-                      )}
-                    </div>
-                  </div>
-
-                  <div style={{ marginBottom: '16px' }}>
-                    <div style={{ fontSize: '0.85rem', fontWeight: '600', marginBottom: '6px' }}>Vancouver</div>
-                    <div style={{ fontSize: '0.8rem', background: '#f3f4f6', padding: '8px', borderRadius: '6px', marginBottom: '8px' }}>
-                      {cites.vancouver}
-                    </div>
-                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                      <button
-                        onClick={() => handleCopyCitation(cites.vancouver)}
-                        style={{
-                          background: '#2563eb',
-                          color: '#ffffff',
-                          border: 'none',
-                          padding: '6px 12px',
-                          borderRadius: '6px',
-                          cursor: 'pointer',
-                          fontSize: '0.8rem'
-                        }}
-                      >
-                        Copy
-                      </button>
-                      {copiedFormat === cites.vancouver && (
-                        <span style={{ fontSize: '0.8rem', color: '#10b981', fontWeight: '600' }}>Copied!</span>
-                      )}
-                    </div>
-                  </div>
-                </>
-              );
+                );
+              });
             })()}
           </div>
         </div>
       )}
 
+      {/* REFERENCE LIST POPUP */}
       {referencePopupVisible && (
-        <div
-          style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: 'rgba(0, 0, 0, 0.5)',
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center',
-            zIndex: 1000
-          }}
-        >
-          <div
-            ref={referencePopupRef}
-            style={{
-              background: '#ffffff',
-              padding: '24px',
-              borderRadius: '12px',
-              maxWidth: '600px',
-              boxShadow: '0 20px 60px rgba(0, 0, 0, 0.3)',
-              maxHeight: '80vh',
-              overflow: 'auto'
-            }}
-          >
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 1000 }}>
+          <div ref={referencePopupRef} style={{ background: '#fff', padding: '24px', borderRadius: '12px', maxWidth: '640px', width: '92vw', boxShadow: '0 20px 60px rgba(0,0,0,0.3)', maxHeight: '80vh', overflow: 'auto' }}>
             {!referenceStyle ? (
               <>
                 <h3 style={{ marginTop: 0, marginBottom: '16px' }}>Choose Citation Style</h3>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  <button
-                    onClick={() => handleSelectReferenceStyle('apa')}
-                    style={{
-                      background: '#2563eb',
-                      color: '#ffffff',
-                      border: 'none',
-                      padding: '10px 16px',
-                      borderRadius: '8px',
-                      cursor: 'pointer',
-                      fontSize: '0.9rem',
-                      fontWeight: '600',
-                      textAlign: 'left'
-                    }}
-                  >
-                    APA Style
-                  </button>
-                  <button
-                    onClick={() => handleSelectReferenceStyle('mla')}
-                    style={{
-                      background: '#2563eb',
-                      color: '#ffffff',
-                      border: 'none',
-                      padding: '10px 16px',
-                      borderRadius: '8px',
-                      cursor: 'pointer',
-                      fontSize: '0.9rem',
-                      fontWeight: '600',
-                      textAlign: 'left'
-                    }}
-                  >
-                    MLA Style
-                  </button>
-                  <button
-                    onClick={() => handleSelectReferenceStyle('vancouver')}
-                    style={{
-                      background: '#2563eb',
-                      color: '#ffffff',
-                      border: 'none',
-                      padding: '10px 16px',
-                      borderRadius: '8px',
-                      cursor: 'pointer',
-                      fontSize: '0.9rem',
-                      fontWeight: '600',
-                      textAlign: 'left'
-                    }}
-                  >
-                    Vancouver Style
-                  </button>
+                  {[['APA 7', 'Alphabetical by author — used in psychology & health sciences'], ['Vancouver', 'Numbered by order of appearance — standard at KI & medical journals'], ['MLA', 'Used in humanities and literature']].map(([style, desc]) => (
+                    <button key={style} onClick={() => handleSelectReferenceStyle(style === 'APA 7' ? 'apa' : style === 'Vancouver' ? 'vancouver' : 'mla')}
+                      style={{ background: '#f8fafc', color: '#1e293b', border: '1px solid #e2e8f0', padding: '12px 16px', borderRadius: '8px', cursor: 'pointer', textAlign: 'left' }}>
+                      <div style={{ fontWeight: '600', fontSize: '0.9rem', marginBottom: '2px' }}>{style}</div>
+                      <div style={{ fontSize: '0.78rem', color: '#64748b' }}>{desc}</div>
+                    </button>
+                  ))}
                 </div>
               </>
             ) : (
               <>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
-                  <h3 style={{ margin: 0 }}>Reference List</h3>
-                  <button
-                    onClick={handleCloseReferencePopup}
-                    style={{
-                      background: 'none',
-                      border: 'none',
-                      fontSize: '1.5rem',
-                      color: '#999',
-                      cursor: 'pointer'
-                    }}
-                  >
-                    ×
-                  </button>
+                  <h3 style={{ margin: 0 }}>Reference List ({referenceStyle.toUpperCase()})</h3>
+                  <button onClick={handleCloseReferencePopup} style={{ background: 'none', border: 'none', fontSize: '1.5rem', color: '#999', cursor: 'pointer' }}>×</button>
                 </div>
-                <textarea
-                  value={generatedReferences}
-                  readOnly
-                  style={{
-                    width: '100%',
-                    height: '300px',
-                    padding: '12px',
-                    border: '1px solid #d1d5db',
-                    borderRadius: '8px',
-                    fontFamily: 'monospace',
-                    fontSize: '0.8rem',
-                    marginBottom: '12px',
-                    resize: 'none'
-                  }}
-                />
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                  <button
-                    onClick={handleCopyReferences}
-                    style={{
-                      background: '#2563eb',
-                      color: '#ffffff',
-                      border: 'none',
-                      padding: '10px 16px',
-                      borderRadius: '8px',
-                      cursor: 'pointer',
-                      fontSize: '0.9rem',
-                      fontWeight: '600',
-                      flex: 1
-                    }}
-                  >
-                    Copy All
-                  </button>
-                  {referenceCopied && (
-                    <span style={{ fontSize: '0.85rem', color: '#10b981', fontWeight: '600' }}>Copied!</span>
-                  )}
+                <textarea value={generatedReferences} readOnly style={{ width: '100%', height: '320px', padding: '12px', border: '1px solid #e2e8f0', borderRadius: '8px', fontFamily: 'monospace', fontSize: '0.8rem', marginBottom: '12px', resize: 'none', boxSizing: 'border-box', lineHeight: '1.6' }} />
+                <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+                  <button onClick={handleCopyReferences} style={{ background: '#2563eb', color: '#fff', border: 'none', padding: '10px 16px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.9rem', fontWeight: '600', flex: 1 }}>Copy All</button>
+                  {referenceCopied && <span style={{ fontSize: '0.85rem', color: '#10b981', fontWeight: '600' }}>✓ Copied!</span>}
                 </div>
               </>
             )}
