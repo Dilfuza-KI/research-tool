@@ -6,6 +6,52 @@ import './index.css';
 
 pdfjs.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
+const STORAGE_KEY = 'research-tool-data-v1';
+
+// PDF blob URLs (from URL.createObjectURL) cannot survive a page reload or be
+// saved to localStorage/JSON — they're temporary, in-memory pointers, not the
+// actual file bytes. Saving/loading strips them out and flags the paper as
+// needing the PDF re-attached, while keeping every other detail (citation,
+// notes, page numbers, highlights) fully intact.
+function stripFileForSave(paper) {
+  if (paper.fileType === 'pdf' && paper.file) {
+    return { ...paper, file: null, needsReattach: true };
+  }
+  return paper;
+}
+
+function buildSaveableState({ papers, notes, archivedPapers, importedPmids, projects, projectWorkspaces, activeProjectId }) {
+  const cleanWorkspace = (ws) => ({
+    papers: (ws.papers || []).map(stripFileForSave),
+    notes: ws.notes || [],
+    archivedPapers: (ws.archivedPapers || []).map(stripFileForSave),
+    importedPmids: ws.importedPmids || [],
+  });
+  const allWorkspaces = {
+    ...Object.fromEntries(Object.entries(projectWorkspaces).map(([id, ws]) => [id, cleanWorkspace(ws)])),
+    [activeProjectId]: cleanWorkspace({ papers, notes, archivedPapers, importedPmids }),
+  };
+  return { version: 1, savedAt: new Date().toISOString(), projects, activeProjectId, workspaces: allWorkspaces };
+}
+
+function saveToLocalStorage(state) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+    return true;
+  } catch (e) {
+    console.error('Failed to save to localStorage (possibly full):', e);
+    return false;
+  }
+}
+
+function loadFromLocalStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    return JSON.parse(raw);
+  } catch { return null; }
+}
+
 const emptyPaperPlaceholder = { id: null, title: 'No paper selected', file: null, fileType: 'none', tag: 'neutral', sourceType: 'journal', authors: '', organization: '', journal: '', year: '', volume: '', issue: '', pages: '', doi: '', url: '', city: '', publisher: '', edition: '', accessDate: '', newspaper: '', newsDate: '', thesisType: 'master', university: '', reportSeries: '' };
 
 const emptyMeta = { tag: 'neutral', projectId: null, sourceType: 'journal', authors: '', organization: '', journal: '', year: '', volume: '', issue: '', pages: '', doi: '', url: '', city: '', publisher: '', edition: '', accessDate: '', newspaper: '', newsDate: '', thesisType: 'master', university: '', reportSeries: '' };
@@ -231,6 +277,22 @@ async function extractTextFromPDF(fileUrl) {
     }
     return text;
   } catch { return ''; }
+}
+
+// Extract full document text WITH page numbers attached, for the gap scanner —
+// reads every page (not just the first 3) so Discussion/Limitations near the end
+// of longer papers are actually checked, and lets us jump to the right page later.
+async function extractTextByPage(fileUrl) {
+  try {
+    const pdf = await pdfjs.getDocument(fileUrl).promise;
+    const pages = [];
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i);
+      const content = await page.getTextContent();
+      pages.push({ pageNumber: i, text: content.items.map(x => x.str).join(' ') });
+    }
+    return pages;
+  } catch { return []; }
 }
 
 function limitAuthorsVancouver(authorsStr) {
@@ -530,20 +592,31 @@ async function fetchPmcDiscussionText(pmcid) {
 }
 
 function App() {
-  const [papers, setPapers] = useState([]);
+  // Load any previously saved data once, synchronously, before first render.
+  const savedDataRef = useRef(loadFromLocalStorage());
+  const saved = savedDataRef.current;
+  const savedActiveId = saved?.activeProjectId || 'general';
+  const savedActiveWorkspace = saved?.workspaces?.[savedActiveId] || { papers: [], notes: [], archivedPapers: [], importedPmids: [] };
+
+  const [papers, setPapers] = useState(savedActiveWorkspace.papers || []);
   const [selectedPaper, setSelectedPaper] = useState(emptyPaperPlaceholder);
-  const [projects, setProjects] = useState([]); // [{ id, name, color }]
-  const [activeProjectId, setActiveProjectId] = useState('general'); // 'general' | project.id — each is a fully separate workspace
+  const [projects, setProjects] = useState(saved?.projects || []); // [{ id, name, color }]
+  const [activeProjectId, setActiveProjectId] = useState(savedActiveId); // 'general' | project.id — each is a fully separate workspace
   const [newProjectName, setNewProjectName] = useState('');
   const [showNewProjectInput, setShowNewProjectInput] = useState(false);
   const [showProjectSwitcher, setShowProjectSwitcher] = useState(false);
   // Storage for every workspace's data except the one currently active (which lives
   // in the main papers/notes/etc state above for full compatibility with existing code).
   // Shape: { [projectId]: { papers, notes, archivedPapers, importedPmids } }
-  const [projectWorkspaces, setProjectWorkspaces] = useState({});
+  const [projectWorkspaces, setProjectWorkspaces] = useState(() => {
+    if (!saved?.workspaces) return {};
+    const rest = { ...saved.workspaces };
+    delete rest[savedActiveId];
+    return rest;
+  });
   const [pageNumber, setPageNumber] = useState(1);
   const [numPages, setNumPages] = useState(null);
-  const [notes, setNotes] = useState([]);
+  const [notes, setNotes] = useState(savedActiveWorkspace.notes || []);
   const [pageWidth, setPageWidth] = useState(800);
   const [zoom, setZoom] = useState(1.0);
   const [selectedText, setSelectedText] = useState('');
@@ -567,7 +640,7 @@ function App() {
   const [urlDetecting, setUrlDetecting] = useState(false);
 
   // Gap Finder / PubMed search state
-  const [activeView, setActiveView] = useState('library'); // 'library' | 'gapfinder'
+  const [activeView, setActiveView] = useState('library'); // 'library' | 'pubmedsearch'
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState(null);
   const [searching, setSearching] = useState(false);
@@ -575,8 +648,11 @@ function App() {
   const [loadingTrend, setLoadingTrend] = useState(false);
   const [gapStatementsResults, setGapStatementsResults] = useState(null);
   const [searchingGapStatements, setSearchingGapStatements] = useState(false);
-  const [importedPmids, setImportedPmids] = useState([]);
-  const [archivedPapers, setArchivedPapers] = useState([]);
+  const [libraryGapResults, setLibraryGapResults] = useState(null);
+  const [scanningLibraryGaps, setScanningLibraryGaps] = useState(false);
+  const [libraryGapProgress, setLibraryGapProgress] = useState('');
+  const [importedPmids, setImportedPmids] = useState(savedActiveWorkspace.importedPmids || []);
+  const [archivedPapers, setArchivedPapers] = useState(savedActiveWorkspace.archivedPapers || []);
   const [deleteConfirm, setDeleteConfirm] = useState(null); // { paper, noteCount }
   const [duplicateWarning, setDuplicateWarning] = useState(null); // { existingPaper }
   const [mismatchWarning, setMismatchWarning] = useState(null); // { detectedTitle, detectedDoi, savedTitle, savedDoi }
@@ -590,6 +666,7 @@ function App() {
   const pdfFile = useMemo(() => selectedPaper.file, [selectedPaper.id, selectedPaper.file]);
   const isWebSource = selectedPaper.fileType === 'web';
   const isEmpty = selectedPaper.id === null;
+  const needsReattach = selectedPaper.fileType === 'pdf' && !selectedPaper.file;
 
   useEffect(() => {
     if (!viewerRef.current) return;
@@ -622,12 +699,188 @@ function App() {
       });
       setPopupVisible(true);
     };
-    const v = viewerRef.current;
-    v?.addEventListener('mouseup', onMouseUp);
-    return () => v?.removeEventListener('mouseup', onMouseUp);
+    // Listen on document instead of just the container — the container ref can
+    // briefly point to a stale/disconnected node right after switching views
+    // (e.g. opening a paper from Research Gap or Gap Finder), which silently
+    // drops the listener. Listening on document always catches the bubbled event.
+    document.addEventListener('mouseup', onMouseUp);
+    return () => document.removeEventListener('mouseup', onMouseUp);
   }, [pageNumber, isWebSource, selectedPaper.id]);
 
+  // Auto-save to localStorage whenever the data that matters changes, debounced
+  // so rapid edits (typing, highlighting) don't trigger a save on every keystroke.
+  const [lastSavedAt, setLastSavedAt] = useState(saved?.savedAt || null);
+  const [showExportNotesPopup, setShowExportNotesPopup] = useState(false);
+  const [exportOptions, setExportOptions] = useState({
+    includePageNumber: true,
+    includeCitation: true,
+    includeTag: true,
+    includeProject: true,
+    format: 'word', // 'word' | 'pdf'
+    style: 'vancouver', // 'vancouver' | 'apa'
+  });
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const state = buildSaveableState({ papers, notes, archivedPapers, importedPmids, projects, projectWorkspaces, activeProjectId });
+      const ok = saveToLocalStorage(state);
+      if (ok) setLastSavedAt(state.savedAt);
+    }, 800);
+    return () => clearTimeout(timer);
+  }, [papers, notes, archivedPapers, importedPmids, projects, projectWorkspaces, activeProjectId]);
+
   const PROJECT_COLORS = ['#3b82f6', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#ef4444'];
+
+  const handleExportSmartNotes = () => {
+    const projectName = activeProjectId === 'general' ? 'General' : projects.find(p => p.id === activeProjectId)?.name || 'Project';
+
+    // Fix broken PDF extraction hyphenation: "percent-\nages" → "percentages"
+    // and clean up other whitespace artifacts from PDF text extraction
+    const cleanText = (text) => text
+      .replace(/-\n(\w)/g, '$1')   // join hyphenated line-breaks: "percent-\nages" → "percentages"
+      .replace(/\n+/g, ' ')         // all other newlines → single space
+      .replace(/\s{2,}/g, ' ')      // collapse multiple spaces
+      .trim();
+
+    // Build ordered unique paper list (by order of appearance in notes)
+    const seenPapers = [];
+    notes.forEach(note => {
+      if (!seenPapers.find(p => p.title === note.paperName)) {
+        const paper = [...papers, ...archivedPapers].find(p => p.title === note.paperName) || { ...emptyMeta, title: note.paperName };
+        seenPapers.push(paper);
+      }
+    });
+
+    // Build notes section — each note has an inline [N] citation number linking to references
+    let notesHtml = `<h2 style="font-size:14pt; color:#1e3a5f; margin-bottom:18px;">Notes</h2>`;
+    notes.forEach((note) => {
+      const refNum = seenPapers.findIndex(p => p.title === note.paperName) + 1;
+      const tag = note.tag || 'neutral';
+      const tagConfig = TAG_CONFIG[tag] || TAG_CONFIG.neutral;
+      const tagLabel = tagConfig.label;
+      const tagColor = tag === 'supporting' ? '#16a34a' : tag === 'opposing' ? '#dc2626' : '#6b7280';
+
+      const metaParts = [];
+      if (exportOptions.includePageNumber && note.page) metaParts.push(`p. ${note.page}`);
+      if (exportOptions.includeTag) metaParts.push(`<span style="color:${tagColor}; font-weight:600;">${tagLabel}</span>`);
+
+      notesHtml += `<div style="margin-bottom:18px; page-break-inside:avoid;">`;
+      notesHtml += `<div style="font-size:9.5pt; color:#6b7280; margin-bottom:4px;">${metaParts.join(' · ')}</div>`;
+      notesHtml += `<div style="padding:10px 14px; background:#f0f4ff; border-left:4px solid #3b82f6; font-size:11pt; color:#1e293b; line-height:1.7;">`;
+      notesHtml += `${cleanText(note.text)} <a href="#ref-${refNum}" style="color:#2563eb; text-decoration:none; font-weight:700;">[${refNum}]</a>`;
+      notesHtml += `</div>`;
+      notesHtml += `</div>`;
+    });
+
+    // Build references section at the end — like a real paper's reference list
+    let refsHtml = `<hr style="border:none; border-top:1px solid #d1d5db; margin:32px 0 20px;">`;
+    refsHtml += `<h2 style="font-size:14pt; color:#1e3a5f; margin-bottom:14px;">References</h2>`;
+    seenPapers.forEach((paper, idx) => {
+      const refNum = idx + 1;
+      const citation = generateCitations(paper);
+      const citeText = exportOptions.style === 'apa' ? citation.apa : citation.vancouver;
+      refsHtml += `<p id="ref-${refNum}" style="font-size:10pt; color:#374151; margin-bottom:10px; padding-left:28px; text-indent:-28px; line-height:1.5;">`;
+      refsHtml += `<span style="font-weight:700; color:#2563eb;">[${refNum}]</span> ${citeText}`;
+      refsHtml += `</p>`;
+    });
+
+    const fullHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Smart Notes — ${projectName}</title>
+<style>
+  body { font-family: 'Calibri', 'Arial', sans-serif; font-size: 11pt; line-height: 1.6; color: #1a1a1a; max-width: 780px; margin: 0 auto; padding: 48px 56px; }
+  h1 { font-size: 20pt; color: #1e3a5f; border-bottom: 2px solid #1e3a5f; padding-bottom: 10px; margin-bottom: 28px; }
+  a { color: #2563eb; }
+  .print-bar { position: fixed; top: 0; left: 0; right: 0; background: #1e3a5f; color: #fff; padding: 10px 20px; font-family: Arial, sans-serif; font-size: 13px; display: flex; align-items: center; justify-content: space-between; z-index: 9999; }
+  .print-bar button { background: #fff; color: #1e3a5f; border: none; padding: 7px 18px; border-radius: 4px; cursor: pointer; font-weight: bold; font-size: 13px; }
+  .print-bar button:hover { background: #e0f2fe; }
+  .spacer { height: 48px; }
+  @media print { .print-bar { display: none; } .spacer { display: none; } body { padding: 24px 32px; } }
+</style>
+</head>
+<body>
+<div class="print-bar">
+  <span>📄 To save as PDF: click the button → change Destination to <strong>"Save as PDF"</strong> → click Save</span>
+  <button onclick="window.print()">🖨️ Print / Save as PDF</button>
+</div>
+<div class="spacer"></div>
+<h1>Smart Notes — ${projectName}</h1>
+${notesHtml}
+${exportOptions.includeCitation ? refsHtml : ''}
+</body>
+</html>`;
+
+    if (exportOptions.format === 'pdf') {
+      const blob = new Blob([fullHtml], { type: 'text/html;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Smart-Notes-${projectName}-${new Date().toISOString().slice(0, 10)}.html`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setTimeout(() => alert('File downloaded!\n\nTo save as PDF:\n1. Go to your Downloads folder\n2. Double-click the .html file\n3. Press Ctrl+P\n4. Change Destination to "Save as PDF"\n5. Click Save'), 300);
+    } else {
+      // Word .doc — HTML-based, opens natively in Word
+      const wordHtml = `<html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'><head><meta charset='utf-8'><title>Smart Notes</title></head><body>${fullHtml.replace(/<!DOCTYPE.*?>/s,'').replace(/<html.*?>/s,'').replace(/<\/html>/,'').replace(/<head>.*?<\/head>/s,'')}</body></html>`;
+      const blob = new Blob([fullHtml], { type: 'application/msword;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `Smart-Notes-${projectName}-${new Date().toISOString().slice(0, 10)}.doc`;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+    setShowExportNotesPopup(false);
+  };
+
+  const handleExportData = () => {
+    const state = buildSaveableState({ papers, notes, archivedPapers, importedPmids, projects, projectWorkspaces, activeProjectId });
+    const blob = new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const dateStr = new Date().toISOString().slice(0, 10);
+    a.href = url;
+    a.download = `research-tool-backup-${dateStr}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const importFileInputRef = useRef(null);
+  const handleImportClick = () => importFileInputRef.current?.click();
+
+  const handleImportData = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = JSON.parse(e.target.result);
+        if (!data.workspaces) { alert('This file doesn\'t look like a valid backup.'); return; }
+        const importedActiveId = data.activeProjectId || 'general';
+        const importedWorkspace = data.workspaces[importedActiveId] || { papers: [], notes: [], archivedPapers: [], importedPmids: [] };
+        setProjects(data.projects || []);
+        setActiveProjectId(importedActiveId);
+        const rest = { ...data.workspaces };
+        delete rest[importedActiveId];
+        setProjectWorkspaces(rest);
+        setPapers(importedWorkspace.papers || []);
+        setNotes(importedWorkspace.notes || []);
+        setArchivedPapers(importedWorkspace.archivedPapers || []);
+        setImportedPmids(importedWorkspace.importedPmids || []);
+        setSelectedPaper(emptyPaperPlaceholder);
+        alert('Backup restored! Note: PDF files will need to be re-attached since file contents can\'t be stored in the backup.');
+      } catch {
+        alert('Could not read this file. Make sure it\'s a backup exported from this tool.');
+      }
+    };
+    reader.readAsText(file);
+    if (importFileInputRef.current) importFileInputRef.current.value = '';
+  };
 
   const handleCreateProject = () => {
     const name = newProjectName.trim();
@@ -781,6 +1034,7 @@ function App() {
     const { candidate, kind, pmid } = duplicateWarning;
     setPapers(prev => [candidate, ...prev]);
     setSelectedPaper(candidate);
+    setActiveView('library');
     if (kind === 'pdf') { setPageNumber(1); setNumPages(null); setPendingPaper(null); }
     else if (kind === 'web') { setWebQuoteText(''); setIsNewWebSource(false); }
     else if (kind === 'pubmed') { setImportedPmids(prev => [...prev, pmid]); }
@@ -851,7 +1105,7 @@ function App() {
   };
 
   const finishAttachPdf = (paperBeingAttached, fileUrl) => {
-    const updated = { ...paperBeingAttached, file: fileUrl, fileType: 'pdf' };
+    const updated = { ...paperBeingAttached, file: fileUrl, fileType: 'pdf', needsReattach: false };
     setPapers(prev => prev.map(p => p.id === paperBeingAttached.id ? updated : p));
     setSelectedPaper(updated);
     setPageNumber(1);
@@ -1063,6 +1317,75 @@ function App() {
     setSearchingGapStatements(false);
   };
 
+  // Scan every PDF in the current project's library for gap statements,
+  // using the actual extracted text the user already has from uploads —
+  // no PMC needed since the user has the real file (e.g. via university access).
+  const handleOpenGapResultPaper = (paper, pageNumberToOpen) => {
+    setActiveView('library');
+    setSelectedPaper(paper);
+    setNumPages(null);
+    setPageNumber(pageNumberToOpen || 1);
+    // Force a width re-measure once the pdf-container mounts, same fix used
+    // for attach-PDF — switching views can leave pageWidth stale otherwise.
+    let attempts = 0;
+    const tryMeasure = () => {
+      attempts++;
+      if (viewerRef.current) {
+        const width = viewerRef.current.getBoundingClientRect().width;
+        if (width > 0) { setPageWidth(Math.max(200, Math.floor(width))); return; }
+      }
+      if (attempts < 20) requestAnimationFrame(tryMeasure);
+    };
+    requestAnimationFrame(tryMeasure);
+  };
+
+  const handleScanLibraryForGaps = async () => {
+    const pdfPapers = papers.filter(p => p.fileType === 'pdf' && p.file);
+    if (pdfPapers.length === 0) { setLibraryGapResults([]); return; }
+    setScanningLibraryGaps(true);
+    setLibraryGapResults(null);
+    const results = [];
+    for (let i = 0; i < pdfPapers.length; i++) {
+      const p = pdfPapers[i];
+      setLibraryGapProgress(`Scanning ${i + 1} of ${pdfPapers.length}: ${p.title.slice(0, 40)}...`);
+      try {
+        const pages = await extractTextByPage(p.file);
+        const allPhrasesFound = new Set();
+        let firstMatch = null; // { phrase, pageNumber, snippet }
+        for (const page of pages) {
+          const lowerText = page.text.toLowerCase();
+          for (const phrase of GAP_PHRASES) {
+            if (lowerText.includes(phrase)) {
+              allPhrasesFound.add(phrase);
+              if (!firstMatch) {
+                const idx = lowerText.indexOf(phrase);
+                const snippetStart = Math.max(0, idx - 80);
+                const snippetEnd = Math.min(page.text.length, idx + phrase.length + 120);
+                const snippet = (snippetStart > 0 ? '...' : '') + page.text.slice(snippetStart, snippetEnd).replace(/\s+/g, ' ').trim() + (snippetEnd < page.text.length ? '...' : '');
+                firstMatch = { phrase, pageNumber: page.pageNumber, snippet };
+              }
+            }
+          }
+        }
+        if (allPhrasesFound.size > 0) {
+          results.push({ paper: p, gapPhrases: Array.from(allPhrasesFound), snippet: firstMatch.snippet, pageNumber: firstMatch.pageNumber });
+        }
+      } catch { /* skip papers that fail to extract, don't block the rest */ }
+    }
+    setLibraryGapResults(results);
+    setLibraryGapProgress('');
+    setScanningLibraryGaps(false);
+  };
+
+  const handleJumpToImportedPaper = (pubmedPaper) => {
+    const existing = papers.find(p => p.doi && pubmedPaper.doi && p.doi.toLowerCase() === pubmedPaper.doi.toLowerCase())
+      || papers.find(p => p.url === `https://pubmed.ncbi.nlm.nih.gov/${pubmedPaper.pmid}/`);
+    if (existing) {
+      setSelectedPaper(existing);
+      setActiveView('library');
+    }
+  };
+
   const handleImportPaper = (pubmedPaper) => {
     const newPaper = {
       id: Date.now() + Math.random(),
@@ -1089,6 +1412,8 @@ function App() {
     }
     setPapers(prev => [newPaper, ...prev]);
     setImportedPmids(prev => [...prev, pubmedPaper.pmid]);
+    setSelectedPaper(newPaper);
+    setActiveView('library');
   };
 
   return (
@@ -1096,6 +1421,16 @@ function App() {
       <aside className="sidebar" style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflowY: 'auto' }}>
         <div className="sidebar-header" style={{ flexShrink: 0, position: 'relative' }}>
           <h1>Research Tool</h1>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '4px' }}>
+            <span style={{ fontSize: '0.68rem', color: '#6b7280' }}>
+              {lastSavedAt ? `✓ Saved ${new Date(lastSavedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Not saved yet'}
+            </span>
+            <div style={{ display: 'flex', gap: '6px' }}>
+              <button onClick={handleExportData} title="Download a backup file" style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', fontSize: '0.7rem', padding: '2px 4px' }}>⬇ Export</button>
+              <button onClick={handleImportClick} title="Restore from a backup file" style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', fontSize: '0.7rem', padding: '2px 4px' }}>⬆ Import</button>
+              <input ref={importFileInputRef} type="file" accept=".json" onChange={handleImportData} style={{ display: 'none' }} />
+            </div>
+          </div>
           <button onClick={() => setShowProjectSwitcher(v => !v)}
             style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', marginTop: '8px', background: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '8px', padding: '8px 10px', cursor: 'pointer', color: '#fff' }}>
             <span style={{ display: 'flex', alignItems: 'center', gap: '7px', fontSize: '0.85rem', fontWeight: '600' }}>
@@ -1138,13 +1473,13 @@ function App() {
           )}
         </div>
 
-        <div style={{ display: 'flex', gap: '4px', padding: '10px 12px 10px' }}>
-          <button onClick={() => setActiveView('library')} style={{ flex: 1, padding: '7px', borderRadius: '6px', border: 'none', background: activeView === 'library' ? 'rgba(255,255,255,0.15)' : 'transparent', color: activeView === 'library' ? '#fff' : '#9ca3af', cursor: 'pointer', fontSize: '0.78rem', fontWeight: activeView === 'library' ? '600' : '400' }}>
-            📚 Library
-          </button>
-          <button onClick={() => setActiveView('gapfinder')} style={{ flex: 1, padding: '7px', borderRadius: '6px', border: 'none', background: activeView === 'gapfinder' ? 'rgba(255,255,255,0.15)' : 'transparent', color: activeView === 'gapfinder' ? '#fff' : '#9ca3af', cursor: 'pointer', fontSize: '0.78rem', fontWeight: activeView === 'gapfinder' ? '600' : '400' }}>
-            🔍 Gap Finder
-          </button>
+        <div style={{ padding: '8px 12px 10px' }}>
+          <select value={activeView} onChange={e => setActiveView(e.target.value)}
+            style={{ width: '100%', padding: '7px 8px', borderRadius: '6px', border: '1px solid rgba(255,255,255,0.15)', background: '#1f2937', color: '#fff', fontSize: '0.8rem', cursor: 'pointer' }}>
+            <option value="library">📚 Library</option>
+            <option value="pubmedsearch">🌐 PubMed Search</option>
+            <option value="researchgap">🔬 Research Gap (this project)</option>
+          </select>
         </div>
 
         <button className="upload-button" onClick={handleUploadClick}>+ Upload PDF</button>
@@ -1160,7 +1495,7 @@ function App() {
               <div key={paper.id} style={{ marginBottom: '8px' }}>
                 <div style={{ display: 'flex', gap: '4px', alignItems: 'center' }}>
                   <button className={`paper-item ${selectedPaper.id === paper.id ? 'active' : ''}`} onClick={() => handleSelectPaper(paper)} style={{ flex: 1, textAlign: 'left' }}>
-                    {paper.fileType === 'web' ? '🌐 ' : ''}{paper.title}
+                    {paper.fileType === 'web' ? '🌐 ' : (paper.fileType === 'pdf' && !paper.file) ? '📎 ' : ''}{paper.title}
                   </button>
                   <button onClick={e => handleEditPaper(e, paper)} title="Edit metadata" style={{ background: 'none', border: 'none', color: '#9ca3af', cursor: 'pointer', fontSize: '0.85rem', padding: '4px 5px', borderRadius: '4px' }} onMouseOver={e => e.target.style.color = '#fff'} onMouseOut={e => e.target.style.color = '#9ca3af'}>✏️</button>
                   <button onClick={e => handleCiteClick(e, paper)} style={{ background: 'none', border: 'none', color: '#e5e7eb', cursor: 'pointer', fontSize: '0.75rem', padding: '4px 8px', borderRadius: '4px' }} onMouseOver={e => e.target.style.background = 'rgba(255,255,255,0.1)'} onMouseOut={e => e.target.style.background = 'none'}>Cite</button>
@@ -1178,10 +1513,58 @@ function App() {
       </aside>
 
       <main className="viewer-area" style={{ display: 'flex', flexDirection: 'column', height: '100vh', overflow: 'hidden' }}>
-        {activeView === 'gapfinder' ? (
+        {activeView === 'researchgap' ? (
           <div style={{ flex: 1, padding: '20px 28px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
             <div>
-              <h2 style={{ margin: '0 0 4px' }}>Research Gap Finder</h2>
+              <h2 style={{ margin: '0 0 4px' }}>Research Gap — {activeProjectId === 'general' ? 'General' : projects.find(p => p.id === activeProjectId)?.name || 'this project'}</h2>
+              <p style={{ margin: 0, color: '#6b7280', fontSize: '0.85rem' }}>Scans the actual PDFs you've uploaded to this project — including paywalled papers you accessed through your university — for explicit gap statements in the full text.</p>
+            </div>
+
+            <div>
+              <button onClick={handleScanLibraryForGaps} disabled={scanningLibraryGaps || papers.filter(p => p.fileType === 'pdf').length === 0}
+                style={{ padding: '10px 18px', background: scanningLibraryGaps ? '#fde68a' : '#fef3c7', color: '#92400e', border: '1px solid #fde68a', borderRadius: '8px', cursor: scanningLibraryGaps ? 'wait' : 'pointer', fontSize: '0.88rem', fontWeight: '600' }}>
+                {scanningLibraryGaps ? `🔍 ${libraryGapProgress || 'Scanning...'}` : '🔬 Scan my library for gap statements'}
+              </button>
+              {papers.filter(p => p.fileType === 'pdf').length === 0 && (
+                <div style={{ fontSize: '0.78rem', color: '#9ca3af', marginTop: '6px' }}>No PDFs uploaded in this project yet. Upload a PDF or attach one to a paper first.</div>
+              )}
+            </div>
+
+            {libraryGapResults !== null && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                <div style={{ fontSize: '0.85rem', fontWeight: '600', color: '#374151' }}>
+                  {libraryGapResults.length > 0
+                    ? `${libraryGapResults.length} of ${papers.filter(p => p.fileType === 'pdf').length} papers mention a gap`
+                    : `No explicit gap statements found in your ${papers.filter(p => p.fileType === 'pdf').length} uploaded PDF${papers.filter(p => p.fileType === 'pdf').length === 1 ? '' : 's'}`}
+                </div>
+                {libraryGapResults.map(({ paper, gapPhrases, snippet, pageNumber: matchPage }) => (
+                  <div key={paper.id} style={{ border: '1px solid #fde68a', background: '#fffbeb', borderRadius: '8px', padding: '12px 14px' }}>
+                    <div style={{ fontSize: '0.88rem', fontWeight: '600', color: '#1e293b', marginBottom: '6px' }}>{paper.title}</div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginBottom: '8px' }}>
+                      {gapPhrases.map(phrase => (
+                        <span key={phrase} style={{ fontSize: '0.68rem', background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: '10px', border: '1px solid #fde68a' }}>"{phrase}"</span>
+                      ))}
+                    </div>
+                    <div style={{ fontSize: '0.8rem', color: '#57534e', fontStyle: 'italic', lineHeight: '1.5', marginBottom: '8px' }}>"{snippet}" <span style={{ fontStyle: 'normal', color: '#92400e', fontWeight: '600' }}>(page {matchPage})</span></div>
+                    <button onClick={() => handleOpenGapResultPaper(paper, matchPage)}
+                      style={{ fontSize: '0.78rem', padding: '5px 12px', borderRadius: '6px', border: 'none', background: '#2563eb', color: '#fff', cursor: 'pointer', fontWeight: '600' }}>
+                      Open to page {matchPage}
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {libraryGapResults === null && !scanningLibraryGaps && (
+              <div style={{ fontSize: '0.85rem', color: '#6b7280', background: '#f9fafb', border: '1px dashed #e5e7eb', borderRadius: '8px', padding: '14px', lineHeight: '1.6' }}>
+                💡 <strong>Tip:</strong> This only scans papers within your current project ("{activeProjectId === 'general' ? 'General' : projects.find(p => p.id === activeProjectId)?.name || ''}"), so results stay focused on one topic. Switch projects using the dropdown at the top to scan a different set of papers.
+              </div>
+            )}
+          </div>
+        ) : activeView === 'pubmedsearch' ? (
+          <div style={{ flex: 1, padding: '20px 28px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            <div>
+              <h2 style={{ margin: '0 0 4px' }}>PubMed Search</h2>
               <p style={{ margin: 0, color: '#6b7280', fontSize: '0.85rem' }}>Search PubMed to see publication trends and find your research gap</p>
             </div>
 
@@ -1261,9 +1644,9 @@ function App() {
                           <span key={phrase} style={{ fontSize: '0.68rem', background: '#fef3c7', color: '#92400e', padding: '2px 8px', borderRadius: '10px', border: '1px solid #fde68a' }}>"{phrase}"</span>
                         ))}
                       </div>
-                      <button onClick={() => handleImportPaper(p)} disabled={imported}
-                        style={{ fontSize: '0.75rem', padding: '5px 12px', borderRadius: '6px', border: 'none', background: imported ? '#dcfce7' : '#2563eb', color: imported ? '#16a34a' : '#fff', cursor: imported ? 'default' : 'pointer', fontWeight: '600' }}>
-                        {imported ? '✓ Imported' : '+ Import to library'}
+                      <button onClick={() => imported ? handleJumpToImportedPaper(p) : handleImportPaper(p)}
+                        style={{ fontSize: '0.75rem', padding: '5px 12px', borderRadius: '6px', border: 'none', background: imported ? '#dcfce7' : '#2563eb', color: imported ? '#16a34a' : '#fff', cursor: 'pointer', fontWeight: '600' }}>
+                        {imported ? '✓ Imported — open it' : '+ Import to library'}
                       </button>
                     </div>
                   );
@@ -1280,9 +1663,9 @@ function App() {
                     <div key={p.pmid} style={{ border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px 12px' }}>
                       <div style={{ fontSize: '0.85rem', fontWeight: '600', color: '#1e293b', marginBottom: '4px', lineHeight: '1.4' }}>{p.title}</div>
                       <div style={{ fontSize: '0.75rem', color: '#6b7280', marginBottom: '8px' }}>{p.authors} · {p.journal} · {p.year}</div>
-                      <button onClick={() => handleImportPaper(p)} disabled={imported}
-                        style={{ fontSize: '0.75rem', padding: '5px 12px', borderRadius: '6px', border: 'none', background: imported ? '#dcfce7' : '#2563eb', color: imported ? '#16a34a' : '#fff', cursor: imported ? 'default' : 'pointer', fontWeight: '600' }}>
-                        {imported ? '✓ Imported' : '+ Import to library'}
+                      <button onClick={() => imported ? handleJumpToImportedPaper(p) : handleImportPaper(p)}
+                        style={{ fontSize: '0.75rem', padding: '5px 12px', borderRadius: '6px', border: 'none', background: imported ? '#dcfce7' : '#2563eb', color: imported ? '#16a34a' : '#fff', cursor: 'pointer', fontWeight: '600' }}>
+                        {imported ? '✓ Imported — open it' : '+ Import to library'}
                       </button>
                     </div>
                   );
@@ -1303,6 +1686,18 @@ function App() {
             <div style={{ fontSize: '0.85rem', textAlign: 'center', maxWidth: '320px', lineHeight: '1.5' }}>
               Upload a PDF, add a web source, or search PubMed in the Gap Finder tab to get started.
             </div>
+          </div>
+        ) : needsReattach ? (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '14px', color: '#92400e', padding: '40px' }}>
+            <div style={{ fontSize: '2.5rem' }}>📎</div>
+            <div style={{ fontSize: '1.05rem', fontWeight: '600', color: '#374151', textAlign: 'center', maxWidth: '420px' }}>{selectedPaper.title}</div>
+            <div style={{ fontSize: '0.85rem', textAlign: 'center', maxWidth: '420px', lineHeight: '1.6', color: '#6b7280' }}>
+              This PDF needs to be re-attached after the page reloaded. Your citation details, tags, and Smart Notes for this paper are all safe — just upload the same file again to keep reading and highlighting.
+            </div>
+            <button onClick={handleAttachPdfClick} style={{ background: '#fef3c7', border: '1px solid #f59e0b', color: '#92400e', padding: '9px 18px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.88rem', fontWeight: '600' }}>
+              + Re-attach PDF
+            </button>
+            <input ref={attachPdfInputRef} type="file" accept=".pdf" onChange={handleAttachPdf} style={{ display: 'none' }} />
           </div>
         ) : (
         <>
@@ -1435,7 +1830,12 @@ function App() {
             );
           })}
         </div>
-        {notes.length > 0 && <button onClick={handleGenerateReferences} style={{ flexShrink: 0, width: '100%', background: '#2563eb', color: '#fff', border: 'none', padding: '8px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.85rem', fontWeight: '600', marginTop: '12px' }}>Generate References</button>}
+        {notes.length > 0 && (
+          <div style={{ flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '12px' }}>
+            <button onClick={handleGenerateReferences} style={{ width: '100%', background: '#2563eb', color: '#fff', border: 'none', padding: '8px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.85rem', fontWeight: '600' }}>Generate References</button>
+            <button onClick={() => setShowExportNotesPopup(true)} style={{ width: '100%', background: '#fff', color: '#374151', border: '1px solid #d1d5db', padding: '8px 12px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.85rem', fontWeight: '600' }}>⬇ Export Smart Notes</button>
+          </div>
+        )}
       </aside>
 
       {/* DUPLICATE PAPER WARNING */}
@@ -1485,6 +1885,71 @@ function App() {
               <button onClick={confirmAttachAnyway}
                 style={{ background: '#fef3c7', border: '1px solid #fde68a', color: '#92400e', padding: '10px 14px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.85rem', fontWeight: '600', textAlign: 'left' }}>
                 Attach anyway (I'm sure this is correct)
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* EXPORT SMART NOTES POPUP */}
+      {showExportNotesPopup && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.5)', display: 'flex', justifyContent: 'center', alignItems: 'center', zIndex: 2100 }} onClick={() => setShowExportNotesPopup(false)}>
+          <div onClick={e => e.stopPropagation()} style={{ background: '#fff', padding: '24px', borderRadius: '12px', width: '420px', maxWidth: '90vw', boxShadow: '0 20px 60px rgba(0,0,0,0.3)' }}>
+            <h3 style={{ marginTop: 0, marginBottom: '4px', fontSize: '1.05rem' }}>Export Smart Notes</h3>
+            <p style={{ fontSize: '0.82rem', color: '#6b7280', marginBottom: '18px' }}>{notes.length} notes from {[...new Set(notes.map(n => n.paperName))].length} papers</p>
+
+            <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#374151', marginBottom: '8px' }}>Include in export:</div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '18px' }}>
+              {[
+                { key: 'includePageNumber', label: '📄 Page number for each note' },
+                { key: 'includeCitation', label: '📚 Full citation for each paper' },
+                { key: 'includeTag', label: '🏷️ Tag (Supporting / Opposing / Neutral)' },
+                { key: 'includeProject', label: '📁 Project name' },
+              ].map(({ key, label }) => (
+                <label key={key} style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', fontSize: '0.85rem', color: '#374151' }}>
+                  <input type="checkbox" checked={exportOptions[key]} onChange={e => setExportOptions(prev => ({ ...prev, [key]: e.target.checked }))}
+                    style={{ width: '16px', height: '16px', cursor: 'pointer' }} />
+                  {label}
+                </label>
+              ))}
+            </div>
+
+            {exportOptions.includeCitation && (
+              <div style={{ marginBottom: '18px' }}>
+                <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#374151', marginBottom: '6px' }}>Citation style:</div>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  {['vancouver', 'apa'].map(s => (
+                    <button key={s} onClick={() => setExportOptions(prev => ({ ...prev, style: s }))}
+                      style={{ flex: 1, padding: '7px', borderRadius: '6px', border: `1px solid ${exportOptions.style === s ? '#2563eb' : '#d1d5db'}`, background: exportOptions.style === s ? '#eff6ff' : '#fff', color: exportOptions.style === s ? '#2563eb' : '#374151', cursor: 'pointer', fontSize: '0.82rem', fontWeight: exportOptions.style === s ? '600' : '400' }}>
+                      {s === 'vancouver' ? 'Vancouver (KI)' : 'APA 7'}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{ marginBottom: '20px' }}>
+              <div style={{ fontSize: '0.8rem', fontWeight: '600', color: '#374151', marginBottom: '6px' }}>Format:</div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                {[{ id: 'word', label: '📝 Word (.doc)', desc: 'Edit in Microsoft Word' }, { id: 'pdf', label: '🖨️ PDF', desc: 'Print or share' }].map(f => (
+                  <button key={f.id} onClick={() => setExportOptions(prev => ({ ...prev, format: f.id }))}
+                    style={{ flex: 1, padding: '8px', borderRadius: '6px', border: `1px solid ${exportOptions.format === f.id ? '#2563eb' : '#d1d5db'}`, background: exportOptions.format === f.id ? '#eff6ff' : '#fff', color: exportOptions.format === f.id ? '#2563eb' : '#374151', cursor: 'pointer', fontSize: '0.82rem', fontWeight: exportOptions.format === f.id ? '600' : '400', textAlign: 'center' }}>
+                    <div>{f.label}</div>
+                    <div style={{ fontSize: '0.72rem', opacity: 0.7 }}>{f.desc}</div>
+                  </button>
+                ))}
+              </div>
+              {exportOptions.format === 'pdf' && (
+                <div style={{ fontSize: '0.75rem', color: '#6b7280', marginTop: '6px' }}>A print dialog will open — choose "Save as PDF" from your printer options.</div>
+              )}
+            </div>
+
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button onClick={handleExportSmartNotes} style={{ flex: 1, background: '#2563eb', color: '#fff', border: 'none', padding: '10px', borderRadius: '8px', cursor: 'pointer', fontSize: '0.88rem', fontWeight: '600' }}>
+                Export
+              </button>
+              <button onClick={() => setShowExportNotesPopup(false)} style={{ padding: '10px 16px', borderRadius: '8px', border: '1px solid #d1d5db', background: '#f3f4f6', color: '#374151', cursor: 'pointer', fontSize: '0.88rem' }}>
+                Cancel
               </button>
             </div>
           </div>
